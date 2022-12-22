@@ -1,0 +1,4 @@
+fix_cmdline.patch
+tty-prompt-race.patch
+efisiglist_header.patch
+0001-fix-NSS-build-error.patch

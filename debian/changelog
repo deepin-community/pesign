@@ -1,0 +1,133 @@
+pesign (0.112-6) unstable; urgency=medium
+
+  * Fix FTBFS with new versions of NSS, using patch from
+    upstream. Thanks to Dan Nicholson. Closes: #948645
+  * Update Standards-Version to 4.5.1
+  * Update debhelper compat to 10
+
+ -- Steve McIntyre <93sam@debian.org>  Fri, 01 Jan 2021 22:34:53 +0000
+
+pesign (0.112-5) unstable; urgency=high
+
+  * Move git repo from alioth to salsa.d.o
+  * efisiglist: Copy the header correctly (Closes: #928491)
+  * Update obsolete Build-Depends (remove dh-systemd, update debhelper)
+
+ -- Steve McIntyre <93sam@debian.org>  Sun, 05 May 2019 21:22:21 +0100
+
+pesign (0.112-4) unstable; urgency=medium
+
+  * Team upload.
+  * Fix race between printing prompt and disabling tty echo.
+
+ -- Julien Cristau <jcristau@debian.org>  Sat, 13 May 2017 17:36:43 +0200
+
+pesign (0.112-3) unstable; urgency=medium
+
+  * Team upload.
+  * Pass libexecdir correctly to sub-makes so the service file has the right
+    path.
+
+ -- Julien Cristau <jcristau@debian.org>  Mon, 27 Jun 2016 13:59:55 +0200
+
+pesign (0.112-2) unstable; urgency=medium
+
+  [ Julien Cristau ]
+  * Fix pesign service file installation. Closes: #828192
+  * Fix command line parsing. Closes: #828682
+
+ -- Steve McIntyre <93sam@debian.org>  Mon, 27 Jun 2016 10:31:50 +0200
+
+pesign (0.112-1) unstable; urgency=low
+
+  [ Daniel Jared Dominguez ]
+  * update VCS info
+  * use debian-efi list as maintainer
+
+  [ Peter Jones ]
+  * Make "make install_systemd" and "make install_sysvinit" not error.
+  * Install authvar and efisiglist
+  * Make --clear without --export actually work.
+  * Make x509 certs in siglists work.
+  * Ignore some things that wind up in a working tree pretty often.
+  * make efi_guid_t's const.
+
+  [ Pat Riehecky ]
+  * A more plugable way of setting ACLs for pesign
+
+  [ Peter Jones ]
+  * Propogate some "const" declarations better.
+  * Make efivar compiler parameters come from pkg-config.
+  * Add "install" targets for 3c2374b and make the filenames a little nicer.
+
+  [ Daniel Jared Dominguez ]
+  * add manpages for authvar/efisiglist and escape dashes in existing manpages
+
+  [ Peter Jones ]
+  * Make pesign-authorize-{users,groups} not be in sbin.
+
+  [ Gary Ching-Pang Lin ]
+  * Correct the signature size check
+
+  [ Peter Jones ]
+  * Revamp the makefile system entirely.
+  * Don't let make autogenerate a rule for "%".
+  * Fix some -Wsign-compare warnings
+  * Bump version to 0.111
+  * Fix one more -Wsign-compare problem I missed.
+  * pesign: when nss fails to tell us -EPERM or -ENOENT, figure it out.
+  * setfacl the nss DBs to our authorized users, not just the socket.
+  * Don't setfacl when the socket or dir aren't there.
+  * setfacl the db as well
+  * Get rid of KeyIdTemplate; it is unused.
+
+  [ Mirco Tischler ]
+  * fix double $prefix when installing to $docdir
+
+  [ Peter Jones ]
+  * libdpe: Fix a plausible but unrealistic "may be used uninitialized"
+  * Fix our makefile rule so the target binaries are getting linked -g
+  * efikeygen: fix missing libefivar dep for efi_guid_zero
+  * pesigcheck pesign: use LDLIBS+= to link in libdpe.a
+  * efikeygen: don't hide --dbdir option
+  * authvar: add --list-supported-sigs
+  * Minor whitespace fix.
+  * Make -Werror=unused-parameter work.
+  * Make -Werror=type-limits work.
+  * Make -Werror=missing-field-initializers work.
+  * make pesigcheck be able to get cert dbs from a file
+  * makefile crap
+  * try even harder to restrict the time checking in pesigcheck
+  * pesigcheck: check dbfile and dbxfile from popt
+  * efisiglist: add --infile
+  * libdpe: get rid of all the stupid locking
+  * Make things that don't touch PE not need libdpe.
+  * Improve our setfacl scripts for database and socket ownership.
+  * Do a better job of isolating pesign-rh-test-crap
+  * Bump version to 0.112
+
+  [ Daniel Jared Dominguez ]
+  * new upstream release (Closes: #819766)
+  * remove old quilt patches
+
+ -- Daniel Jared Dominguez <Jared_Dominguez@Dell.com>  Wed, 20 Apr 2016 13:27:37 -0500
+
+pesign (0.110-3) UNRELEASED; urgency=low
+
+  * update VCS info
+  * use debian-efi list as maintainer
+
+ -- Daniel Jared Dominguez <Jared_Dominguez@Dell.com>  Wed, 29 Jul 2015 20:12:43 -0500
+
+pesign (0.110-2) unstable; urgency=medium
+
+  * uncomment VCS information in debian/control
+  * change package priority because of dependency on opensc
+
+ -- Daniel Jared Dominguez <Jared_Dominguez@Dell.com>  Tue, 23 Jun 2015 17:51:13 -0500
+
+pesign (0.110-1) unstable; urgency=low
+
+  * Initial release (Closes: #786462)
+
+ -- Daniel Jared Dominguez <Jared_Dominguez@Dell.com>  Thu, 21 May 2015 13:44:16 -0500

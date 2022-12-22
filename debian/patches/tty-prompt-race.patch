@@ -1,0 +1,29 @@
+Fix race condition in SEC_GetPassword
+
+A side effect of echoOff is to discard unread input, so if we print the
+prompt before echoOff, the user (or process) at the other end might
+react to it by writing the password in between those steps, which is
+then discarded.  This bit me when trying to drive pesign with an expect
+script.
+
+Signed-off-by: Julien Cristau <jcristau@debian.org>
+---
+https://github.com/rhinstaller/pesign/pull/29
+
+--- pesign.orig/src/password.c
++++ pesign/src/password.c
+@@ -69,13 +69,13 @@ static char *SEC_GetPassword(FILE *input
+     char phrase[200] = {'\0'};      /* ensure EOF doesn't return junk */
+ 
+     for (;;) {
+ 	/* Prompt for password */
+ 	if (isTTY) {
++	    echoOff(infd);
+ 	    fprintf(output, "%s", prompt);
+             fflush (output);
+-	    echoOff(infd);
+ 	}
+ 
+ 	fgets ( phrase, sizeof(phrase), input);
+ 
+ 	if (isTTY) {

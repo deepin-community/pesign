@@ -1,0 +1,15 @@
+*~
+*.o
+*.so
+*.a
+*.efi
+pesign
+authvar
+ms
+client
+efikeygen
+efisiglist
+pesigcheck
+peverify
+pesign.service
+pesign.sysvinit
