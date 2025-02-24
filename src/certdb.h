@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * certdb.h - decls for our UEFI security databases
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
 #ifndef CERTDB_H
 #define CERTDB_H 1
@@ -43,7 +31,7 @@ typedef struct {
 
 extern db_status check_db_hash(db_specifier which, pesigcheck_context *ctx);
 extern db_status check_db_cert(db_specifier which, pesigcheck_context *ctx,
-				void *data, ssize_t datalen);
+				void *data, ssize_t datalen, SECItem *match);
 
 extern void init_cert_db(pesigcheck_context *ctx, int use_system_dbs);
 extern int add_cert_db(pesigcheck_context *ctx, const char *filename);

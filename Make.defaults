@@ -1,3 +1,5 @@
+NAME	= pesign
+COMMIT_ID ?= $(shell git log -1 --pretty=%H 2>/dev/null || echo master)
 prefix	?= /usr/
 prefix	:= $(abspath $(prefix))/
 libdir	?= $(prefix)lib64/
@@ -7,55 +9,79 @@ datadir	?= $(prefix)share/
 mandir	?= $(datadir)man/
 includedir ?= $(prefix)include/
 bindir	?= $(prefix)bin/
+rundir  ?= /run/
+rundir	:= $(abspath $(rundir))/
 pcdir	?= $(libdir)pkgconfig/
 docdir	?= $(prefix)share/doc/
 DESTDIR	?=
 INSTALLROOT = $(DESTDIR)
 
 INSTALL	?= install
-CROSS_COMPILE	?= $(bindir)
+CROSS_COMPILE	?=
+EFI_ARCHES ?= aa64 ia32 x64
 
-PKG_CONFIG = $(CROSS_COMPILE)pkg-config
-CC	:= $(if $(filter default,$(origin CC)),$(CROSS_COMPILE)gcc,$(CC))
-CCLD	:= $(if $(filter undefined,$(origin CCLD)),$(CC),$(CCLD))
-CFLAGS	?= -O0 -g3 -fvar-tracking -fvar-tracking-assignments \
-	   -Wall -Werror -Wextra
-AS	:= $(CROSS_COMPILE)as
-AR	:= $(CROSS_COMPILE)gcc-ar
-RANLIB	:= $(CROSS_COMPILE)gcc-ranlib
-OBJCOPY	:= $(CROSS_COMPILE)objcopy
-LD	:= $(CROSS_COMPILE)ld
-INSTALL	:= $(CROSS_COMPILE)install
-
-PKGS	=
+enabled = $(if $(filter undefined,$(origin $(1))),$(3),$(2))
 
 HOSTARCH   = $(shell uname -m | sed s,i[3456789]86,ia32,)
 ARCH	   := $(shell uname -m | sed s,i[3456789]86,ia32,)
 
-SOFLAGS	= -shared
+
+PKG_CONFIG ?= $(CROSS_COMPILE)pkg-config
+CC	:= $(if $(filter default,$(origin CC)),$(CROSS_COMPILE)gcc,$(CC))
+CCLD	:= $(if $(filter undefined,$(origin CCLD)),$(CC),$(CCLD))
+CFLAGS	?= -O2 -g3 -pipe -fPIE -fstack-protector-all \
+	-fstack-clash-protection \
+	$(if $(filter x86_64 ia32,$(ARCH)),-fcf-protection=full,)
+DIAGFLAGS ?= $(call enabled,ENABLE_GCC_ANALYZER,-fmessage-length=0 \
+	     -fdiagnostics-color=always \
+	     -fdiagnostics-format=text \
+	     -fdiagnostics-show-cwe \
+	     -fanalyzer) \
+	     $(call enabled,ENABLE_LEAK_CHECKER,-Wno-analyzer-malloc-leak,)
+AS	?= $(CROSS_COMPILE)as
+AR	?= $(CROSS_COMPILE)$(if $(filter $(CC),clang),llvm-ar,$(notdir $(CC))-ar)
+RANLIB	?= $(CROSS_COMPILE)$(if $(filter $(CC),clang),llvm-ranlib,$(notdir $(CC))-ranlib)
+OBJCOPY	?= $(CROSS_COMPILE)objcopy
+LD	?= $(CROSS_COMPILE)ld
+INSTALL	?= $(CROSS_COMPILE)install
+
+PKGS	= efivar nspr nss nss-util uuid
+
+SOFLAGS	?= -shared
 clang_cflags =
-gcc_cflags = -Wmaybe-uninitialized
+gcc_cflags = -Wmaybe-uninitialized -grecord-gcc-switches \
+             $(call enabled,ENABLE_LEAK_CHECKER,$(call enabled,ENABLE_LEAK_CHECKER_LTO,-flto,),) \
+	     $(DIAGFLAGS)
+ifneq (,$(wildcard /usr/lib/gcc/x86_64-redhat-linux/*/plugin/annobin.so))
+  gcc_cflags += -fplugin=annobin
+endif
+
 cflags	= $(CFLAGS) $(ARCH3264) \
-	-Wall -Werror -Wno-cpp  -Wsign-compare -Wno-unused-result \
-	-Wno-unused-function\
-	-std=gnu11 -fshort-wchar -fPIC -flto -fno-strict-aliasing \
-	-fno-merge-constants -fkeep-inline-functions \
+	-Wall -Wextra -Wsign-compare -Wno-unused-result \
+	-Wno-unused-function -Wno-missing-field-initializers \
+	$(call enabled,ENABLE_LEAK_CHECKER,-Wno-analyzer-malloc-leak,) \
+	-Werror -Wno-error=cpp -Wno-free-nonheap-object \
+	-std=gnu11 -fshort-wchar -fPIC -fno-strict-aliasing \
 	-D_GNU_SOURCE -DCONFIG_$(ARCH) -I${TOPDIR}/include \
+	'-DRUNDIR="$(rundir)"' \
 	$(if $(filter $(CC),clang),$(clang_cflags), ) \
 	$(if $(filter $(CC),gcc),$(gcc_cflags), ) \
-	$(call pkg-config-cflags) -Werror
+	$(call pkg-config-cflags)
 clang_ccldflags =
 gcc_ccldflags = -fno-merge-constants \
+	-fvar-tracking -fvar-tracking-assignments -fkeep-inline-functions \
 	-Wl,--fatal-warnings,--no-allow-shlib-undefined,--default-symver \
 	-Wl,-O2 -Wl,--no-undefined-version -Wl,-z,relro,-z,now \
-	--Wl,--no-add-needed,--no-copy-dt-needed-entries,--as-needed
+	-Wl,--no-add-needed,--no-copy-dt-needed-entries,--as-needed -pie
 ccldflags = $(cflags) $(CCLDFLAGS) $(LDFLAGS) \
 	$(if $(filter $(CCLD),clang),$(clang_ccldflags),) \
 	$(if $(filter $(CCLD),gcc),$(gcc_ccldflags),) \
 	$(call pkg-config-ccldflags)
 efi_cflags = $(cflags)
-ASFLAGS	= $(ARCH3264)
-CPPFLAGS ?=
+ASFLAGS	?= $(ARCH3264)
+CPPFLAGS ?= -D_FORTIFY_SOURCE=2 -D_GLIBCXX_ASSERTIONS
+RANLIBFLAGS	?= $(if $(filter $(CC),gcc),-D)
+ARFLAGS ?= $(if $(filter $(CC),gcc),-Dcvqs)$(if $(filter $(CC),clang),-cqvs)
 
 LDLIBS	= $(foreach lib,$(LIBS),-l$(lib)) $(call pkg-config-ldlibs)
 
@@ -75,4 +101,3 @@ ifeq ($(ARCH), x86_64)
     ARCH3264 := -m64
   endif
 endif
-

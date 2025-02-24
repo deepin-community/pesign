@@ -1,24 +1,14 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012-2013 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * efikeygen.c - key generation with reasonable defaults for Secure Boot
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
+#include "fix_coverity.h"
 
 #include <err.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <popt.h>
 #include <stdio.h>
@@ -48,8 +38,19 @@
 
 #include <libdpe/libdpe.h>
 
-#include "cms_common.h"
 #include "util.h"
+#include "cms_common.h"
+#include "errno-guard.h"
+#include "oid.h"
+#include "password.h"
+
+enum {
+	MODSIGN_EKU_NONE,
+	MODSIGN_EKU_KERNEL,
+	MODSIGN_EKU_MODULE,
+	MODSIGN_EKU_KEK,
+	MODSIGN_EKU_CA
+};
 
 typedef struct {
 	SECItem data;
@@ -82,6 +83,34 @@ static SEC_ASN1Template SignedCertTemplate[] = {
 };
 
 static int
+add_trust(cms_context *cms, CERTIssuerAndSN *ias,
+	  const char *truststr)
+{
+	int rc;
+	CERTCertificate *cert;
+	CERTCertTrust trust;
+	SECStatus status;
+
+	memset(&trust, 0, sizeof(trust));
+
+	status = CERT_DecodeTrustString(&trust, truststr);
+	if (status != SECSuccess)
+		cmsreterr(-1, cms, "could not decode trust string");
+
+	rc = find_certificate_by_issuer_and_sn(cms, ias, &cert);
+	if (rc < 0)
+		cmsreterr(-1, cms, "Could not find certificate");
+
+	status = CERT_ChangeCertTrust(CERT_GetDefaultCertDB(), cert, &trust);
+	if (status != SECSuccess)
+		cmsreterr(-1, cms, "could not set trust for certificate");
+
+	CERT_DestroyCertificate(cert);
+
+	return 0;
+}
+
+static int
 bundle_signature(cms_context *cms, SECItem *sigder, SECItem *data,
 		SECOidTag oid, SECItem *signature)
 {
@@ -90,11 +119,15 @@ bundle_signature(cms_context *cms, SECItem *sigder, SECItem *data,
 			 .len = data->len,
 			 .type = data->type
 		},
-		.sig = {.data = calloc(1, signature->len + 1),
+		.sig = {.data = NULL,
 			.len = signature->len + 1,
 			.type = signature->type
 		}
 	};
+
+	cert.sig.data = PORT_ArenaZAlloc(cms->arena, signature->len + 1);
+	if (!cert.sig.data)
+		cmsreterr(-1, cms, "Could not allocate signature bundle");
 
 	memcpy((void *)cert.sig.data + 1, signature->data, signature->len);
 
@@ -121,6 +154,7 @@ add_subject_key_id(cms_context *cms, void *extHandle, SECKEYPublicKey *pubkey)
 		cmsreterr(-1, cms, "could not encode subject key id extension");
 
 	SECItem *encoded = PK11_MakeIDFromPubKey(pubkey_der);
+	SECITEM_FreeItem(pubkey_der, PR_TRUE);
 	if (!encoded)
 		cmsreterr(-1, cms, "could not encode subject key id extension");
 
@@ -128,6 +162,7 @@ add_subject_key_id(cms_context *cms, void *extHandle, SECKEYPublicKey *pubkey)
 	 * wrapper for this... */
 	SECItem wrapped = { 0 };
 	int rc = generate_octet_string(cms, &wrapped, encoded);
+	SECITEM_FreeItem(encoded, PR_TRUE);
 	if (rc < 0)
 		cmsreterr(-1, cms, "could not encode subject key id extension");
 
@@ -145,14 +180,16 @@ add_auth_key_id(cms_context *cms, void *extHandle, SECKEYPublicKey *pubkey)
 {
 	SECItem *pubkey_der = PK11_DEREncodePublicKey(pubkey);
 	if (!pubkey_der)
-		cmserr(-1, cms, "could not encode CA Key ID extension");
+		cmsreterr(-1, cms, "could not encode CA Key ID extension");
 
 	SECItem *encoded = PK11_MakeIDFromPubKey(pubkey_der);
+	SECITEM_FreeItem(pubkey_der, PR_TRUE);
 	if (!encoded)
-		cmserr(-1, cms, "could not encode CA Key ID extension");
+		cmsreterr(-1, cms, "could not encode CA Key ID extension");
 
 	SECItem cspecific = { 0 };
 	int rc = make_context_specific(cms, 0, &cspecific, encoded);
+	SECITEM_FreeItem(encoded, PR_TRUE);
 	if (rc < 0)
 		cmsreterr(-1, cms, "could not encode subject key id extension");
 
@@ -167,25 +204,27 @@ add_auth_key_id(cms_context *cms, void *extHandle, SECKEYPublicKey *pubkey)
 	status = CERT_AddExtension(extHandle, SEC_OID_X509_AUTH_KEY_ID,
 					&wrapped, PR_FALSE, PR_TRUE);
 	if (status != SECSuccess)
-		cmserr(-1, cms, "could not encode CA Key ID extension");
+		cmsreterr(-1, cms, "could not encode CA Key ID extension");
 	return 0;
 }
 
 
 static int
-add_key_usage(cms_context *cms, void *extHandle, int is_ca)
+add_key_usage(cms_context *cms, void *extHandle, int is_ca, bool is_kek)
 {
 	SECCertificateUsage usage;
 	SECItem bitStringValue;
 
 	if (is_ca) {
-		usage = KU_KEY_CERT_SIGN |
-			KU_CRL_SIGN |
-			KU_DIGITAL_SIGNATURE;
-	} else {
+		usage = KU_DIGITAL_SIGNATURE |
+			KU_KEY_CERT_SIGN |
+			KU_CRL_SIGN;
+	} else if (is_kek) {
 		usage = KU_KEY_ENCIPHERMENT |
 			KU_DATA_ENCIPHERMENT |
 			KU_DIGITAL_SIGNATURE;
+	} else {
+		return 0;
 	}
 
 	bitStringValue.data = (unsigned char *)&usage;
@@ -201,11 +240,12 @@ add_key_usage(cms_context *cms, void *extHandle, int is_ca)
 	return 0;
 }
 
+#if 0
 static int
 add_cert_type(cms_context *cms, void *extHandle, int is_ca)
 {
 	SECItem bitStringValue;
-	unsigned char type = NS_CERT_TYPE_APP;
+	int type = NS_CERT_TYPE_APP;
 
 	if (is_ca)
 		type |= NS_CERT_TYPE_SSL_CA |
@@ -223,13 +263,14 @@ add_cert_type(cms_context *cms, void *extHandle, int is_ca)
 
 	return 0;
 }
+#endif
 
 static int
-add_basic_constraints(cms_context *cms, void *extHandle)
+add_basic_constraints(cms_context *cms, void *extHandle, int is_ca)
 {
 	CERTBasicConstraints basicConstraint;
 	basicConstraint.pathLenConstraint = CERT_UNLIMITED_PATH_CONSTRAINT;
-	basicConstraint.isCA = PR_TRUE;
+	basicConstraint.isCA = is_ca ? PR_TRUE : PR_FALSE;
 
 	SECStatus status;
 
@@ -249,20 +290,47 @@ add_basic_constraints(cms_context *cms, void *extHandle)
 }
 
 static int
-add_extended_key_usage(cms_context *cms, void *extHandle)
+add_extended_key_usage(cms_context *cms, int modsign_eku, void *extHandle)
 {
-	SECItem value = {
-		.data = (unsigned char *)"\x30\x0a\x06\x08\x2b\x06\x01"
-					 "\x05\x05\x07\x03\x03",
-		.len = 12,
-		.type = siBuffer
-	};
-
-
+	SECItem values[3];
+	SECItem wrapped = { 0 };
 	SECStatus status;
+	SECOidTag tag;
+	int rc;
+	size_t nvals = 0;
+
+	if (modsign_eku == MODSIGN_EKU_CA
+	    || modsign_eku == MODSIGN_EKU_KEK)
+		return 0;
+
+	if (modsign_eku != MODSIGN_EKU_KERNEL
+	    && modsign_eku != MODSIGN_EKU_MODULE)
+		cmsreterr(-1, cms, "could not encode extended key usage");
+
+	rc = make_eku_oid(cms, &values[nvals++], SEC_OID_EXT_KEY_USAGE_CODE_SIGN);
+	if (rc < 0)
+		cmsreterr(-1, cms, "could not encode extended key usage");
+
+#if 0
+	tag = find_ms_oid_tag(SPC_UEFI_SB_CA);
+	rc = make_eku_oid(cms, &values[nvals++], tag);
+	if (rc < 0)
+		cmsreterr(-1, cms, "could not encode extended key usage");
+#endif
+
+	if (modsign_eku == MODSIGN_EKU_MODULE) {
+		tag = find_ms_oid_tag(SHIM_EKU_MODULE_SIGNING_ONLY);
+		rc = make_eku_oid(cms, &values[nvals++], tag);
+		if (rc < 0)
+			cmsreterr(-1, cms, "could not encode extended key usage");
+	}
+
+	rc = wrap_in_seq(cms, &wrapped, values, nvals);
+	if (rc < 0)
+		cmsreterr(-1, cms, "could not encode extended key usage");
 
 	status = CERT_AddExtension(extHandle, SEC_OID_X509_EXT_KEY_USAGE,
-					&value, PR_FALSE, PR_TRUE);
+					&wrapped, PR_FALSE, PR_TRUE);
 	if (status != SECSuccess)
 		cmsreterr(-1, cms, "could not encode extended key usage");
 
@@ -292,9 +360,9 @@ add_auth_info(cms_context *cms, void *extHandle, char *url)
 
 static int
 add_extensions_to_crq(cms_context *cms, CERTCertificateRequest *crq,
-			int is_ca, int is_self_signed, SECKEYPublicKey *pubkey,
-			SECKEYPublicKey *spubkey,
-			char *url)
+			int is_ca, bool is_kek, int is_self_signed,
+			SECKEYPublicKey *pubkey, SECKEYPublicKey *spubkey,
+			char *url, int modsign_eku)
 {
 	void *mark = PORT_ArenaMark(cms->arena);
 
@@ -308,24 +376,24 @@ add_extensions_to_crq(cms_context *cms, CERTCertificateRequest *crq,
 	if (rc < 0)
 		cmsreterr(-1, cms, "could not generate certificate extensions");
 
-	if (is_ca) {
-		rc = add_basic_constraints(cms, extHandle);
-		if (rc < 0)
-			cmsreterr(-1, cms, "could not generate certificate "
-					"extensions");
-	}
+	rc = add_basic_constraints(cms, extHandle, is_ca);
+	if (rc < 0)
+		cmsreterr(-1, cms, "could not generate certificate "
+				"extensions");
 
-	rc = add_key_usage(cms, extHandle, is_ca);
+	rc = add_key_usage(cms, extHandle, is_ca, is_kek);
 	if (rc < 0)
 		cmsreterr(-1, cms, "could not generate certificate extensions");
 
-	rc = add_extended_key_usage(cms, extHandle);
+	rc = add_extended_key_usage(cms, modsign_eku, extHandle);
 	if (rc < 0)
 		cmsreterr(-1, cms, "could not generate certificate extensions");
 
+#if 0
 	rc = add_cert_type(cms, extHandle, is_ca);
 	if (rc < 0)
 		cmsreterr(-1, cms, "could not generate certificate extensions");
+#endif
 
 	if (is_self_signed)
 		rc = add_auth_key_id(cms, extHandle, pubkey);
@@ -343,6 +411,7 @@ add_extensions_to_crq(cms_context *cms, CERTCertificateRequest *crq,
 
 	CERT_FinishExtensions(extHandle);
 	CERT_FinishCertificateRequestAttributes(crq);
+	PORT_ArenaRelease(cms->arena, mark);
 	PORT_ArenaUnmark(cms->arena, mark);
 	return 0;
 }
@@ -465,11 +534,167 @@ SEC_ASN1EncodeLongLong(PRArenaPool *poolp, SECItem *dest,
 	return dest;
 }
 
+static const struct {
+	mode_t mode;
+	int idx;
+	char c;
+} modebits[] = {
+	{S_IRUSR, 0, 'r'},
+	{S_IWUSR, 1, 'w'},
+	{S_IXUSR, 2, 'x'},
+	{S_ISUID, 2, 's'},
+	{S_IXUSR|S_ISUID, 2, 'S'},
+	{S_IRGRP, 3, 'r'},
+	{S_IWGRP, 4, 'w'},
+	{S_IXGRP, 5, 'x'},
+	{S_ISGID, 5, 's'},
+	{S_IXGRP|S_ISGID, 5, 'S'},
+	{S_IROTH, 6, 'r'},
+	{S_IWOTH, 7, 'w'},
+	{S_IXOTH, 8, 'x'},
+	{S_ISVTX, 8, 't'},
+	{S_IXOTH|S_ISVTX, 8, 'T'},
+	{0, 0, 0}
+};
+
+static void
+format_file_mode(mode_t mode, char modestr[10])
+{
+	for (unsigned int i = 0; modebits[i].mode != 0; i++) {
+		mode_t mask = ~modebits[i].mode;
+		if (~(mode & mask) == modebits[i].mode)
+			modestr[modebits[i].idx] = modebits[i].c;
+	}
+}
+
+static void
+enforce_file_mode(mode_t badmask, const char * filename, int fd)
+{
+	struct stat statbuf;
+	xpfstat(filename, fd, &statbuf);
+	if (!(statbuf.st_mode & badmask))
+		return;
+
+	char filemode[] = "---------";
+
+	close(fd);
+	format_file_mode(statbuf.st_mode, filemode);
+	errx(1, "Password file \"%s\" has unsafe file mode %s; not proceeding.",
+	     filename, filemode);
+}
+
+static void
+get_pw_env(pk12_file_t *file, const char *arg)
+{
+	if (!file)
+		errx(1, "--pk12-pw-env must be paired with --pk12-in or --pk12-out");
+	file->pw = secure_getenv(arg);
+	if (file->pw == NULL)
+		errx(1, "Environment variable \"%s\" is not set.", arg);
+	file->pw = xstrdup(file->pw);
+	if (!file->pw)
+		err(1, "Could not allocate memory");
+}
+
+static void
+get_pw_file(pk12_file_t *file, const char *arg)
+{
+	int fd;
+	int rc;
+	int errno_guard;
+	char *pw = NULL;
+	size_t pwsize = 0;
+
+	if (!file)
+		errx(1, "--pk12-pw-file must be paired with --pk12-in or --pk12-out");
+
+	fd = xopen(arg, O_RDONLY);
+	enforce_file_mode(0077, arg, fd);
+	rc = read_file(fd, &pw, &pwsize);
+	errno = 0;
+	set_errno_guard_with_override(&errno_guard);
+
+	close(fd);
+
+	if (rc < 0)
+		err(1, "Could not read \"%s\"", arg);
+	for (ssize_t i = pwsize; i >= 0; i--) {
+		switch (pw[i]) {
+		case '\r':
+		case '\n':
+			pw[i] = '\0';
+			/* fall through */
+		case '\0':
+			continue;
+		default:
+			break;
+		}
+	}
+	file->pw = pw;
+}
+
+void
+popt_callback(poptContext con UNUSED,
+	      enum poptCallbackReason reason UNUSED,
+	      const struct poptOption *opt,
+	      const char *arg, const void *data)
+{
+	cms_context *cms = (cms_context *)data;
+	static pk12_file_t *prev = NULL;
+	pk12_file_t *file = NULL;
+
+	if (!opt)
+		return;
+
+	switch (opt->shortName) {
+	case '\0':
+		if (!strcmp(opt->longName, "pk12-pw-env")) {
+			get_pw_env(prev, arg);
+		} else if (!strcmp(opt->longName, "pk12-pw-file")) {
+			get_pw_file(prev, arg);
+		} else {
+			errx(1,
+			     "Unknown option \"%s\" - how did it come to this?",
+			     opt->longName);
+		}
+		break;
+
+	case 'P':
+		file = xcalloc(1, sizeof(*file));
+		file->path = xstrdup(arg);
+		file->fd = xopen(arg, O_RDONLY);
+		list_add(&file->list, &cms->pk12_ins);
+		prev = file;
+		break;
+
+	case 'O':
+		file = &cms->pk12_out;
+		if (file->path)
+			errx(1, "pk12 output is already set to \"%s\"", file->path);
+		file->path = xstrdup(arg);
+		file->fd = xopen(arg, O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC, 0600);
+		prev = file;
+		break;
+
+	default:
+		errx(1, "How did it come to this?");
+	}
+}
+
+static long verbose = 0;
+
+long verbosity(void)
+{
+	return verbose;
+}
+
 int main(int argc, char *argv[])
 {
 	int is_ca = 0;
 	int is_self_signed = -1;
-	char *tokenname = "NSS Certificate DB";
+	int modsign_eku = MODSIGN_EKU_NONE;
+	char *orig_tokenname = "NSS Certificate DB";
+	char *tokenname = orig_tokenname;
 	char *signer = NULL;
 	char *nickname = NULL;
 	char *pubfile = NULL;
@@ -477,16 +702,27 @@ int main(int argc, char *argv[])
 	char *url = NULL;
 	char *serial_str = NULL;
 	char *issuer = NULL;
-	char *dbdir = "/etc/pki/pesign";
+	char *orig_dbdir = "/etc/pki/pesign";
+	char *dbdir = orig_dbdir;
+	char *db_path = NULL, *dbx_path = NULL, *dbt_path = NULL;
+	char *kek_nickname = NULL;
 	unsigned long long serial = ULLONG_MAX;
 	uuid_t serial_uuid;
+	int rc;
+	SECStatus status;
+	char *not_valid_before = NULL, *not_valid_after = NULL;
+	PRTime not_before = PR_Now();
+	PRTime not_after;
+	PRStatus prstatus;
+	void *frees[50] = { NULL, };
+	int nfrees = 0;
 
 	cms_context *cms = NULL;
 
 	poptContext optCon;
 	struct poptOption options[] = {
 		{.argInfo = POPT_ARG_INTL_DOMAIN,
-		 .descrip = "pesign" },
+		 .arg = "pesign" },
 		/* global nss-ish things */
 		{.longName = "dbdir",
 		 .shortName = 'd',
@@ -522,6 +758,24 @@ int main(int argc, char *argv[])
 		 .descrip = "Generate a self-signed certificate" },
 
 		/* stuff about the generated key */
+		{.longName = "kek",
+		 .shortName = 'K',
+		 .argInfo = POPT_ARG_VAL|POPT_ARGFLAG_OR|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = &modsign_eku,
+		 .val = MODSIGN_EKU_KEK,
+		 .descrip = "Generate a key to use as KEK" },
+		{.longName = "kernel",
+		 .shortName = 'k',
+		 .argInfo = POPT_ARG_VAL|POPT_ARGFLAG_OR,
+		 .arg = &modsign_eku,
+		 .val = MODSIGN_EKU_KERNEL,
+		 .descrip = "Generate a kernel-signing certificate" },
+		{.longName = "module",
+		 .shortName = 'm',
+		 .argInfo = POPT_ARG_VAL|POPT_ARGFLAG_OR,
+		 .arg = &modsign_eku,
+		 .val = MODSIGN_EKU_MODULE,
+		 .descrip = "Generate a module-signing certificate" },
 		{.longName = "nickname",
 		 .shortName = 'n',
 		 .argInfo = POPT_ARG_STRING,
@@ -546,6 +800,18 @@ int main(int argc, char *argv[])
 		 .arg = &serial_str,
 		 .descrip = "Serial number (default: random)",
 		 .argDescrip = "<serial>" },
+		{.longName = "verbose",
+		 .shortName = 'v',
+		 .argInfo = POPT_ARG_VAL,
+		 .arg = &verbose,
+		 .val = 1,
+		 .descrip = "Be more verbose" },
+		{.longName = "debug",
+		 .shortName = '\0',
+		 .argInfo = POPT_ARG_VAL|POPT_ARG_LONG|POPT_ARGFLAG_OPTIONAL,
+		 .arg = &verbose,
+		 .val = 2,
+		 .descrip = "Be very verbose" },
 
 		/* hidden things */
 		{.longName = "pubkey",
@@ -560,6 +826,73 @@ int main(int argc, char *argv[])
 		 .arg = &issuer,
 		 .descrip = "Issuer Common Name",
 		 .argDescrip = "<issuer-cn>" },
+		{.longName = "not-valid-before",
+		 .shortName = '\0',
+		 .argInfo = POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = &not_valid_before,
+		 .descrip = "\"Not Valid Before\" date",
+		 .argDescrip = "<date>",
+		},
+		{.longName = "not-valid-after",
+		 .shortName = '\0',
+		 .argInfo = POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = &not_valid_after,
+		 .descrip = "\"Not Valid After\" date",
+		 .argDescrip = "<date>",
+		},
+
+		/*
+		 * The features below here are hidden because they're not
+		 * really ready for consumption yet.
+		 */
+		{.longName = "pk12-in",
+		 .shortName = 'P',
+		 .argInfo = POPT_ARG_CALLBACK|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = (void *)popt_callback,
+		 .descrip = (void *)cms,
+		 .argDescrip = "<keydb.pk12>"},
+		{.longName = "pk12-out",
+		 .shortName = 'O',
+		 .argInfo = POPT_ARG_CALLBACK|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = (void *)popt_callback,
+		 .descrip = (void *)cms,
+		 .argDescrip = "<out.pk12>"},
+		{.longName = "pk12-pw-file",
+		 .shortName = '\0',
+		 .argInfo = POPT_ARG_CALLBACK|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = (void *)popt_callback,
+		 .descrip = (void *)cms,
+		 .argDescrip = "<file.pw>"},
+		{.longName = "pk12-pw-env",
+		 .shortName = '\0',
+		 .argInfo = POPT_ARG_CALLBACK|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = (void *)popt_callback,
+		 .descrip = (void *)cms,
+		 .argDescrip = "<ENVIRONMENT VARIABLE NAME>"},
+		{.longName = "kek-nickname",
+		 .shortName = 'K',
+		 .argInfo = POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = &kek_nickname,
+		 .descrip = "Nickname of the KEK signing key (defaults to same as signer)",
+		 .argDescrip = "<KEK nickname>"},
+		{.longName = "make-efi-db",
+		 .shortName = 'D',
+		 .argInfo = POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = &db_path,
+		 .descrip = "File to store a signed DB append in",
+		 .argDescrip = "<db.bin>"},
+		{.longName = "make-efi-dbx",
+		 .shortName = 'X',
+		 .argInfo = POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = &dbx_path,
+		 .descrip = "File to store a signed DBX append in",
+		 .argDescrip = "<dbx.bin>"},
+		{.longName = "make-efi-dbt",
+		 .shortName = 'T',
+		 .argInfo = POPT_ARG_STRING|POPT_ARGFLAG_DOC_HIDDEN,
+		 .arg = &dbt_path,
+		 .descrip = "File to store a signed DBT append in",
+		 .argDescrip = "<dbt.bin>"},
 
 		/* automatic stuff */
 		POPT_AUTOALIAS
@@ -567,15 +900,36 @@ int main(int argc, char *argv[])
 		POPT_TABLEEND
 	};
 
+	setenv("NSS_DEFAULT_DB_TYPE", "sql", 0);
+
+	rc = cms_context_alloc(&cms);
+	if (rc < 0)
+		liberr(1, "could not allocate cms context");
+
 	optCon = poptGetContext("pesign", argc, (const char **)argv, options,0);
 
-	int rc = poptReadDefaultConfig(optCon, 0);
+	rc = poptReadDefaultConfig(optCon, 0);
 	if (rc < 0 && !(rc == POPT_ERROR_ERRNO && errno == ENOENT))
 		errx(1, "poptReadDefaultConfig failed: %s",
 			poptStrerror(rc));
 
-	while ((rc = poptGetNextOpt(optCon)) > 0)
-		;
+	while ((rc = poptGetNextOpt(optCon)) > 0) {
+		switch (rc) {
+		case 'c': frees[nfrees++] = cn; break;
+		case 'D': frees[nfrees++] = db_path; break;
+		case 'd': frees[nfrees++] = dbdir; break;
+		case 'i': frees[nfrees++] = issuer; break;
+		case 'K': frees[nfrees++] = kek_nickname; break;
+		case 'n': frees[nfrees++] = nickname; break;
+		case 'p': frees[nfrees++] = pubfile; break;
+		case 's': frees[nfrees++] = serial_str; break;
+		case 'T': frees[nfrees++] = dbt_path; break;
+		case 't': frees[nfrees++] = tokenname; break;
+		case 'u': frees[nfrees++] = url; break;
+		case 'X': frees[nfrees++] = dbx_path; break;
+		default: printf("rc is '%c' (0x%02hhx)\n", rc, rc); break;
+		}
+	}
 
 	if (rc < -1)
 		errx(1, "invalid argument: %s: %s",
@@ -590,10 +944,12 @@ int main(int argc, char *argv[])
 	/*
 	 * Scenarios that are okay (x == valid combination)
 	 *
-	 *         is_ca        is_self_signed       pubkey
-	 * i_c     x            x                    x
-	 * i_s_s   x            x                    o
-	 * pubkey  x            o                    o
+	 *		is_ca   is_self_signed  pubkey	modules	kernel
+	 * i_c		x       x               x	o	o
+	 * i_s_s	x       x               o	o	o
+	 * pubkey	x       o               x	x	x
+	 * modules	o	x		x	x	x
+	 * kernel	o	x		x	x	x
 	 */
 
 	if (is_self_signed == -1)
@@ -613,22 +969,31 @@ int main(int argc, char *argv[])
 	if (!is_self_signed && !signer)
 		errx(1, "signing certificate is required");
 
-	rc = cms_context_alloc(&cms);
-	if (rc < 0)
-		liberr(1, "could not allocate cms context");
+	cms->tokenname = tokenname;
+	cms->certname = signer;
 
-	if (tokenname) {
-		cms->tokenname = strdup(tokenname);
-		if (!cms->tokenname)
-			liberr(1, "could not allocate cms context");
-	}
-	if (signer) {
-		cms->certname = strdup(signer);
-		if (!cms->certname)
-			liberr(1, "could not allocate cms context");
+	if (is_ca) {
+		if (modsign_eku != MODSIGN_EKU_NONE)
+			errx(1, "CA certificates cannot have kernel or module signing credentials.");
+		modsign_eku = MODSIGN_EKU_CA;
+	} else if (modsign_eku != MODSIGN_EKU_KERNEL
+		   && modsign_eku != MODSIGN_EKU_MODULE
+		   && modsign_eku != MODSIGN_EKU_KEK) {
+		errx(1, "either --kernel or --module must be used");
 	}
 
-	SECStatus status = NSS_InitReadWrite(dbdir);
+	if (!strcmp(dbdir, "-") && list_empty(&cms->pk12_ins) && !is_self_signed)
+		errx(1, "'--dbdir -' requires either --pk12-in or --self-sign.");
+
+	PK11_SetPasswordFunc(cms->func ? cms->func : readpw);
+	if (strcmp(dbdir, "-")) {
+		if (cms->pk12_out.fd >= 0)
+			status = NSS_Init(dbdir);
+		else
+			status = NSS_InitReadWrite(dbdir);
+	} else {
+		status = NSS_NoDB_Init(dbdir);
+	}
 	if (status != SECSuccess)
 		nsserr(1, "could not initialize NSS");
 	atexit((void (*)(void))NSS_Shutdown);
@@ -638,6 +1003,10 @@ int main(int argc, char *argv[])
 
 	SECKEYPublicKey *pubkey = NULL;
 	SECKEYPrivateKey *privkey = NULL;
+
+	status = register_oids(cms);
+	if (status != SECSuccess)
+		nsserr(1, "Could not register OIDs");
 
 	PK11SlotInfo *slot = NULL;
 	if (pubfile) {
@@ -691,9 +1060,54 @@ int main(int argc, char *argv[])
 		if (errno == ERANGE && serial == ULLONG_MAX)
 			liberr(1, "invalid serial number");
 	}
+
+	if (not_valid_before) {
+		unsigned long timeul;
+		char *endptr;
+
+		errno = 0;
+		timeul = strtoul(not_valid_before, &endptr, 0);
+		dbgprintf("not_valid_before:%lu", timeul);
+		if (errno == 0 && endptr && *endptr == 0) {
+			dbgprintf("not_valid_before:%lu", timeul);
+			not_before = (PRTime)timeul * PR_USEC_PER_SEC;
+		} else {
+			prstatus = PR_ParseTimeString(not_valid_before,
+						PR_TRUE, &not_before);
+			conderrx(prstatus != PR_SUCCESS, 1,
+				 "could not parse date \"%s\"",
+				 not_valid_before);
+		}
+		dbgprintf("not_before:%"PRId64, not_before);
+	}
+
+	if (not_valid_after) {
+		unsigned long timeul;
+		char *endptr;
+
+		errno = 0;
+		dbgprintf("not_valid_after:%s", not_valid_after);
+		timeul = strtoul(not_valid_after, &endptr, 0);
+		dbgprintf("not_valid_after:%lu", timeul);
+		if (errno == 0 && endptr && *endptr == 0) {
+			dbgprintf("not_valid_after:%lu", timeul);
+			not_after = (PRTime)timeul * PR_USEC_PER_SEC;
+		} else {
+			prstatus = PR_ParseTimeString(not_valid_after, PR_TRUE,
+						      &not_after);
+			conderrx(prstatus != PR_SUCCESS, 1,
+				 "could not parse date \"%s\"",
+				 not_valid_after);
+		}
+	} else {
+		// Mon Jan 19 03:14:07 GMT 2037, aka 0x7fffffff minus 1 year.
+		time_t time = 0x7ffffffful - 60ul * 60 * 24 * 365;
+		dbgprintf("not_valid_after:%lu", time);
+		not_after = (PRTime)time * PR_USEC_PER_SEC;
+	}
+	dbgprintf("not_after:%"PRId64, not_after);
+
 	CERTValidity *validity = NULL;
-	PRTime not_before = time(NULL) * PR_USEC_PER_SEC;
-	PRTime not_after = not_before + (3650ULL * 86400ULL * PR_USEC_PER_SEC);
 	validity = CERT_CreateValidity(not_before, not_after);
 	if (!validity)
 		nsserr(1, "could not generate validity");
@@ -712,8 +1126,10 @@ int main(int argc, char *argv[])
 	CERTCertificateRequest *crq = NULL;
 	crq = CERT_CreateCertificateRequest(name, spki, &attributes);
 
-	rc = add_extensions_to_crq(cms, crq, is_ca, is_self_signed, pubkey,
-					spubkey, url);
+	rc = add_extensions_to_crq(cms, crq, is_ca,
+				   modsign_eku == MODSIGN_EKU_KEK,
+				   is_self_signed, pubkey,
+				   spubkey, url, modsign_eku);
 	if (rc < 0)
 		exit(1);
 
@@ -797,6 +1213,8 @@ int main(int argc, char *argv[])
 	SECItem signature;
 	status = SEC_SignData(&signature, certder.data, certder.len,
 				sprivkey, oid->offset);
+	if (status != SECSuccess)
+		nsserr(1, "could not create signature");
 
 	SECItem sigder = { 0, };
 	bundle_signature(cms, &sigder, &certder,
@@ -805,7 +1223,50 @@ int main(int argc, char *argv[])
 
 	status = PK11_ImportDERCert(slot, &sigder, CK_INVALID_HANDLE, nickname,
 				PR_FALSE);
+	if (status != SECSuccess)
+		nsserr(1, "could not import signature");
+
+	CERTIssuerAndSN ias;
+	memcpy(&ias.derIssuer, &cert->derIssuer, sizeof(ias.derIssuer));
+	memcpy(&ias.issuer, &cert->issuer, sizeof(ias.issuer));
+	memcpy(&ias.serialNumber, &cert->serialNumber, sizeof(ias.serialNumber));
+
+	add_trust(cms, &ias, is_ca ? ",,CTu" : ",,u");
+
+	SECITEM_FreeItem(&sigder, PR_FALSE);
+	SECITEM_FreeItem(&signature, PR_FALSE);
+
+	if (privkey != sprivkey)
+		SECKEY_DestroyPrivateKey(sprivkey);
+	SECKEY_DestroyPrivateKey(privkey);
+	if (pubkey != spubkey)
+		SECKEY_DestroyPublicKey(spubkey);
+	SECKEY_DestroyPublicKey(pubkey);
+
+	SECKEY_DestroySubjectPublicKeyInfo(spki);
+
+	if (issuer || is_self_signed)
+		CERT_DestroyName(issuer_name);
+	CERT_DestroyName(name);
+	CERT_DestroyValidity(validity);
+
+	CERT_DestroyCertificateRequest(crq);
+
+	cms_context_fini(cms);
 
 	NSS_Shutdown();
+
+	if (signer)
+		free(signer);
+	if (not_valid_before)
+		free(not_valid_before);
+	if (not_valid_after)
+		free(not_valid_after);
+
+	for (int i = 0; i < nfrees; i++)
+		free(frees[i]);
+
 	return 0;
 }
+
+// vim:fenc=utf-8:tw=75:noet

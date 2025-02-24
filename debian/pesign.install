@@ -9,12 +9,11 @@ libexecdir=${libdir}
 mandir=${datadir}/man
 sysconfdir=etc
 localstatedir=var
-unitdir=lib/systemd/system
+unitdir=usr/lib/systemd/system
 prefix=usr
 
 echo ${bindir}/authvar
 echo ${bindir}/efikeygen
-echo ${bindir}/efisiglist
 echo ${bindir}/pesigcheck
 echo ${bindir}/pesign
 echo ${bindir}/pesign-client
@@ -27,8 +26,7 @@ echo /etc/pki/pesign
 #echo %ghost %attr(0660, -, -) ${localstatedir}/run/%{name}/socket
 #echo %ghost %attr(0660, -, -) ${localstatedir}/run/%{name}/pesign.pid
 echo ${prefix}/lib/tmpfiles.d/pesign.conf
-echo usr/${unitdir}/pesign.service ${unitdir}
-echo ${datadir}/pesign/pesign-authorize-users
-echo ${datadir}/pesign/pesign-authorize-groups
+echo ${unitdir}/pesign.service ${unitdir}
+echo ${datadir}/pesign/pesign-authorize
 echo ${sysconfdir}/pesign/users
 echo ${sysconfdir}/pesign/groups

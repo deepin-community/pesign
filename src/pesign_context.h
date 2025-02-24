@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * pesign_context.h - context setup and teardown for pesign
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
 #ifndef PESIGN_CONTEXT_H
 #define PESIGN_CONTEXT_H 1
@@ -26,15 +14,33 @@ enum {
 	PESIGN_C_ALLOCATED = 1,
 };
 
+typedef enum {
+	FORMAT_PE_BINARY,
+	FORMAT_KERNEL_MODULE,
+} file_format;
+
 typedef struct {
-	int infd;
-	int outfd;
-	char *infile;
-	char *outfile;
+	union {
+		int infd;
+		int inkmodfd;
+	};
+	union {
+		int outfd;
+		int outkmodfd;
+	};
+	union {
+		char *infile;
+		char *inkmod;
+	};
+	union {
+		char *outfile;
+		char *outkmod;
+	};
+	size_t inlength;
 	mode_t outmode;
 
 	int force;
-	int verbose;
+	long verbose;
 
 	char *rawsig;
 	int rawsigfd;

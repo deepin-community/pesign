@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * content_info.c - implement the authenticode content_info structure
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
-
 #include "pesign.h"
 
 #include <stddef.h>
@@ -194,7 +181,7 @@ generate_spc_digest_info(cms_context *cms, SECItem *dip)
 	if (generate_algorithm_id(cms, &di.digestAlgorithm,
 			digest_get_digest_oid(cms)) < 0)
 		return -1;
-	int i = cms->selected_digest;
+	unsigned int i = cms->selected_digest;
 	memcpy(&di.digest, cms->digests[i].pe_digest, sizeof (di.digest));
 
 	if (content_is_empty(di.digest.data, di.digest.len)) {
@@ -417,8 +404,8 @@ generate_authvar_content_info(cms_context *cms, SpcContentInfo *cip)
 }
 
 void
-free_spc_content_info(cms_context *cms __attribute__((__unused__)),
-		      SpcContentInfo *cip __attribute__((__unused__)))
+free_spc_content_info(cms_context *cms UNUSED,
+		      SpcContentInfo *cip UNUSED)
 {
 #if 0
 	SECITEM_FreeItem(&cip->contentType, PR_TRUE);

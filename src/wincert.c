@@ -1,36 +1,28 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011-2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * wincert.c - implement the PE authenticode certification database
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
-
 #include "pesign.h"
 
-struct cert_list_entry {
-	win_certificate wc;
-	uint8_t data[];
-};
+typedef win_certificate_pkcs_signed_data_t cert_list_entry_t;
 
+/*
+ * gcc's leak checker simply cannot believe that this code does not leak the
+ * allocation for data, either (bizarrely) on every iteration of the loop that
+ * fills it or when generate_cert_list() returns, even though the trace it
+ * gives you stops right before the call to free()
+ */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wanalyzer-malloc-leak"
 static int
 generate_cert_list(SECItem **signatures, int num_signatures,
-		void **cert_list, size_t *cert_list_size)
+		   void **cert_list, size_t *cert_list_size)
 {
 	size_t cl_size = 0;
 	for (int i = 0; i < num_signatures; i++) {
-		cl_size += sizeof (win_certificate);
+		cl_size += sizeof (win_certificate_header_t);
 		cl_size += signatures[i]->len;
 		cl_size += ALIGNMENT_PADDING(cl_size, 8);
 	}
@@ -46,14 +38,14 @@ generate_cert_list(SECItem **signatures, int num_signatures,
 		/* pe-coff 8.2 adds some text that says each cert list
 		 * entry is 8-byte aligned, so that means we need to align
 		 * them here. */
-		struct cert_list_entry *cle = (struct cert_list_entry *)data;
-		cle->wc.length = signatures[i]->len +
-			sizeof (win_certificate);
-		cle->wc.revision = WIN_CERT_REVISION_2_0;
-		cle->wc.cert_type = WIN_CERT_TYPE_PKCS_SIGNED_DATA;
+		cert_list_entry_t *cle = (cert_list_entry_t *)data;
+		cle->hdr.length = signatures[i]->len +
+			sizeof (win_certificate_header_t);
+		cle->hdr.revision = WIN_CERT_REVISION_2_0;
+		cle->hdr.cert_type = WIN_CERT_TYPE_PKCS_SIGNED_DATA;
 		memcpy(&cle->data[0], signatures[i]->data,
 					signatures[i]->len);
-		data += sizeof (win_certificate) + signatures[i]->len;
+		data += sizeof (win_certificate_header_t) + signatures[i]->len;
 		data += ALIGNMENT_PADDING(signatures[i]->len, 8);
 	}
 
@@ -63,9 +55,15 @@ generate_cert_list(SECItem **signatures, int num_signatures,
 static int
 implant_cert_list(Pe *pe, void *cert_list, size_t cert_list_size)
 {
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	int rc = pe_alloccert(pe, cert_list_size);
 	if (rc < 0)
 		return rc;
+
 	return pe_populatecert(pe, cert_list, cert_list_size);
 }
 
@@ -74,6 +72,11 @@ finalize_signatures(SECItem **sigs, int num_sigs, Pe *pe)
 {
 	void *clist = NULL;
 	size_t clist_size = 0;
+
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
 
 	if (generate_cert_list(sigs, num_sigs,
 				&clist, &clist_size) < 0)
@@ -86,10 +89,16 @@ finalize_signatures(SECItem **sigs, int num_sigs, Pe *pe)
 	free(clist);
 	return 0;
 }
+#pragma GCC diagnostic pop
 
 int
 cert_iter_init(cert_iter *iter, Pe *pe)
 {
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	iter->pe = pe;
 	iter->n = 0;
 	iter->certs = 0;
@@ -143,11 +152,11 @@ done:
 		return 0;
 
 	while (1) {
-		win_certificate *tmpcert;
+		win_certificate_header_t *tmpcert;
 		if (n + sizeof (*tmpcert) >= size)
 			goto done;
 
-		tmpcert = (win_certificate *)((uint8_t *)certs + n);
+		tmpcert = (win_certificate_header_t *)((uint8_t *)certs + n);
 
 		if ((intptr_t)tmpcert > (intptr_t)((intptr_t)map + map_size))
 			return -1;
@@ -256,7 +265,7 @@ get_total_sigspace_size(cms_context *cms, Pe *pe, SECItem *sig)
 	/* at this point ret is any amount of padding we need plus any number
 	 * of previous entries.  Add the amount for this entry, which *doesn't*
 	 * yet include any padding. */
-	ret += sizeof(win_certificate);
+	ret += sizeof(win_certificate_header_t);
 	ret += sig->len;
 
 	/* and finally, the spec actually says:
@@ -315,7 +324,6 @@ parse_signatures(SECItem ***sigs, int *num_sigs, Pe *pe)
 	ssize_t datalen;
 	int nsigs = 0;
 
-	rc = 0;
 	while (1) {
 		rc = next_cert(&iter, &data, &datalen);
 		if (rc <= 0)
@@ -365,9 +373,16 @@ err:
 	if (signatures) {
 		for (i = 0; i < nsigs; i++) {
 			if (signatures[i]) {
-				if (signatures[i]->data)
+				if (signatures[i]->data) /* <-- see below */
 					free(signatures[i]->data);
 				free(signatures[i]);
+				/*
+				 * in gcc-10.1.1-1.fc32 , -fanalyzer believes the test
+				 * above is a use-after free.  I really don't see how,
+				 * but this somehow convinces it there's nothing wrong
+				 * there.
+				 */
+				signatures[i] = NULL;
 			}
 		}
 		free(signatures);

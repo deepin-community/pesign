@@ -1,30 +1,22 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012-2014 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * daemon.c - pesign's signing daemon
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
+#include "fix_coverity.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <poll.h>
 #include <pwd.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -35,6 +27,7 @@
 #include <grp.h>
 
 #include "pesign.h"
+#include "file_kmod.h"
 
 #include <prerror.h>
 #include <nss.h>
@@ -68,7 +61,7 @@ steal_from_cms(cms_context *old, cms_context *new)
 
 static void
 hide_stolen_goods_from_cms(cms_context *new,
-			   cms_context *old __attribute__((__unused__)))
+			   cms_context *old UNUSED)
 {
 	new->tokenname = NULL;
 	new->certname = NULL;
@@ -120,9 +113,9 @@ send_response(context *ctx, cms_context *cms, struct pollfd *pollfd, int32_t rc)
 }
 
 static void
-handle_kill_daemon(context *ctx __attribute__((__unused__)),
-		   struct pollfd *pollfd __attribute__((__unused__)),
-		   socklen_t size __attribute__((__unused__)))
+handle_kill_daemon(context *ctx UNUSED,
+		   struct pollfd *pollfd UNUSED,
+		   socklen_t size UNUSED)
 {
 	should_exit = 1;
 }
@@ -160,6 +153,7 @@ handle_unlock_token(context *ctx, struct pollfd *pollfd, socklen_t size)
 	struct msghdr msg;
 	struct iovec iov;
 	ssize_t n;
+	char *pin = NULL;
 
 	int rc = cms_context_alloc(&ctx->cms);
 	if (rc < 0) {
@@ -227,12 +221,19 @@ malformed:
 	if (!ctx->cms->tokenname)
 		goto oom;
 
-	char *pin = (char *)tp->value;
+	pin = strndup((char *)tp->value, tp->size);
 	if (!pin)
 		goto oom;
 
+	secuPWData pwdata;
+
+	memset(&pwdata, 0, sizeof(pwdata));
+	pwdata.source = pwdata.orig_source = PW_PLAINTEXT;
+	pwdata.data = pin;
+	pwdata.intdata = -1;
+
 	cms_set_pw_callback(ctx->cms, get_password_passthrough);
-	cms_set_pw_data(ctx->cms, pin);
+	cms_set_pw_data(ctx->cms, &pwdata);
 
 	rc = unlock_nss_token(ctx->cms);
 
@@ -452,15 +453,125 @@ set_up_outpe(context *ctx, int fd, Pe *inpe, Pe **outpe)
 	return 0;
 }
 
+static int
+sign_pe(context *ctx, int infd, int outfd, int attached)
+{
+	Pe *inpe = NULL;
+
+	int rc = set_up_inpe(ctx, infd, &inpe);
+	if (rc < 0)
+		goto finish;
+
+	if (attached) {
+		Pe *outpe = NULL;
+		rc = set_up_outpe(ctx, outfd, inpe, &outpe);
+		if (rc < 0)
+			goto finish;
+
+		rc = generate_digest(ctx->cms, outpe, 1);
+		if (rc < 0) {
+err_attached:
+			pe_end(outpe);
+			ftruncate(outfd, 0);
+			goto finish;
+		}
+		ssize_t sigspace = calculate_signature_space(ctx->cms, outpe);
+		if (sigspace < 0)
+			goto err_attached;
+		allocate_signature_space(outpe, sigspace);
+		rc = generate_digest(ctx->cms, outpe, 1);
+		if (rc < 0)
+			goto err_attached;
+		rc = generate_signature(ctx->cms);
+		if (rc < 0)
+			goto err_attached;
+		insert_signature(ctx->cms, ctx->cms->num_signatures);
+		finalize_signatures(ctx->cms->signatures,
+				ctx->cms->num_signatures, outpe);
+		pe_end(outpe);
+	} else {
+		ftruncate(outfd, 0);
+		rc = generate_digest(ctx->cms, inpe, 1);
+		if (rc < 0) {
+err_detached:
+			ftruncate(outfd, 0);
+			goto finish;
+		}
+		rc = generate_signature(ctx->cms);
+		if (rc < 0)
+			goto err_detached;
+		rc = export_signature(ctx->cms, outfd, 0);
+		if (rc >= 0)
+			ftruncate(outfd, rc);
+		else if (rc < 0)
+			goto err_detached;
+	}
+
+finish:
+	if (inpe)
+		pe_end(inpe);
+
+	return rc;
+}
+
+static int
+sign_kmod(context *ctx, int infd, int outfd, int attached)
+{
+	unsigned char *map;
+	struct stat statbuf;
+	ssize_t sig_len;
+	int rc;
+
+	rc = fstat(infd, &statbuf);
+	if (rc != 0) {
+		ctx->cms->log(ctx->cms, ctx->priority|LOG_ERR,
+			"could not stat input file: %m");
+		return rc;
+	}
+
+	map = mmap(NULL, statbuf.st_size, PROT_READ, MAP_PRIVATE, infd, 0);
+	if (map == MAP_FAILED) {
+		ctx->cms->log(ctx->cms, ctx->priority|LOG_ERR,
+			"could not map input file: %m");
+		return -1;
+
+	}
+
+	rc = kmod_generate_digest(ctx->cms, map, statbuf.st_size);
+	if (rc < 0)
+		goto out;
+
+	if (attached) {
+		rc = write_file(outfd, map, statbuf.st_size);
+		if (rc) {
+			ctx->cms->log(ctx->cms, ctx->priority|LOG_ERR,
+				"could not write module data: %m");
+			goto out;
+		}
+	}
+
+	sig_len = kmod_write_signature(ctx->cms, outfd);
+	if (sig_len < 0) {
+		rc = sig_len;
+		goto out;
+	}
+
+	rc = kmod_write_sig_info(ctx->cms, outfd, sig_len);
+
+out:
+	munmap(map, statbuf.st_size);
+	return rc;
+}
+
 static void
 handle_signing(context *ctx, struct pollfd *pollfd, socklen_t size,
-	int attached)
+	       int attached, bool with_file_type)
 {
 	struct msghdr msg;
 	struct iovec iov;
 	ssize_t n;
 	char *buffer = malloc(size);
-	Pe *inpe = NULL;
+	uint32_t file_format;
 
 	if (!buffer) {
 oom:
@@ -478,7 +589,14 @@ oom:
 
 	n = recvmsg(pollfd->fd, &msg, MSG_WAITALL);
 
-	pesignd_string *tn = (pesignd_string *)buffer;
+	if (with_file_type) {
+		file_format = *((uint32_t *) buffer);
+		n -= sizeof(uint32_t);
+	} else {
+		file_format = FORMAT_PE_BINARY;
+	}
+
+	pesignd_string *tn = (pesignd_string *)(buffer + sizeof(uint32_t));
 	if (n < (long long)sizeof(tn->size)) {
 malformed:
 		ctx->cms->log(ctx->cms, ctx->priority|LOG_ERR,
@@ -532,60 +650,23 @@ malformed:
 		goto finish;
 	}
 
-	rc = set_up_inpe(ctx, infd, &inpe);
-	if (rc < 0)
-		goto finish;
-
-	rc = 0;
-	if (attached) {
-		Pe *outpe = NULL;
-		rc = set_up_outpe(ctx, outfd, inpe, &outpe);
-		if (rc < 0)
-			goto finish;
-
-		rc = generate_digest(ctx->cms, outpe, 1);
-		if (rc < 0) {
-err_attached:
-			pe_end(outpe);
-			ftruncate(outfd, 0);
-			goto finish;
-		}
-		ssize_t sigspace = calculate_signature_space(ctx->cms, outpe);
-		if (sigspace < 0)
-			goto err_attached;
-		allocate_signature_space(outpe, sigspace);
-		rc = generate_digest(ctx->cms, outpe, 1);
-		if (rc < 0)
-			goto err_attached;
-		rc = generate_signature(ctx->cms);
-		if (rc < 0)
-			goto err_attached;
-		insert_signature(ctx->cms, ctx->cms->num_signatures);
-		finalize_signatures(ctx->cms->signatures,
-				ctx->cms->num_signatures, outpe);
-		pe_end(outpe);
-	} else {
-		ftruncate(outfd, 0);
-		rc = generate_digest(ctx->cms, inpe, 1);
-		if (rc < 0) {
-err_detached:
-			ftruncate(outfd, 0);
-			goto finish;
-		}
-		rc = generate_signature(ctx->cms);
-		if (rc < 0)
-			goto err_detached;
-		rc = export_signature(ctx->cms, outfd, 0);
-		if (rc >= 0)
-			ftruncate(outfd, rc);
-		else if (rc < 0)
-			goto err_detached;
+	switch (file_format) {
+	case FORMAT_PE_BINARY:
+		rc = sign_pe(ctx, infd, outfd, attached);
+		break;
+	case FORMAT_KERNEL_MODULE:
+		rc = sign_kmod(ctx, infd, outfd, attached);
+		break;
+	default:
+		rc = -1;
+		break;
 	}
 
-finish:
-	if (inpe)
-		pe_end(inpe);
+	if (rc < 0)
+		ctx->cms->log(ctx->cms, ctx->priority|LOG_ERR,
+			      "unrecognised format %d", file_format);
 
+finish:
 	close(infd);
 	close(outfd);
 
@@ -593,8 +674,9 @@ finish:
 	teardown_digests(ctx->cms);
 }
 
-static void
-handle_sign_attached(context *ctx, struct pollfd *pollfd, socklen_t size)
+static inline void
+handle_sign_helper(context *ctx, struct pollfd *pollfd, socklen_t size,
+		   int attached, bool with_file_type)
 {
 	int rc = cms_context_alloc(&ctx->cms);
 	if (rc < 0)
@@ -602,34 +684,43 @@ handle_sign_attached(context *ctx, struct pollfd *pollfd, socklen_t size)
 
 	steal_from_cms(ctx->backup_cms, ctx->cms);
 
-	handle_signing(ctx, pollfd, size, 1);
+	handle_signing(ctx, pollfd, size, attached, with_file_type);
 
 	hide_stolen_goods_from_cms(ctx->cms, ctx->backup_cms);
 	cms_context_fini(ctx->cms);
+}
+
+static void
+handle_sign_attached(context *ctx, struct pollfd *pollfd, socklen_t size)
+{
+	handle_sign_helper(ctx, pollfd, size, 1, false);
+}
+
+static void
+handle_sign_attached_with_file_type(context *ctx, struct pollfd *pollfd, socklen_t size)
+{
+	handle_sign_helper(ctx, pollfd, size, 1, true);
 }
 
 static void
 handle_sign_detached(context *ctx, struct pollfd *pollfd, socklen_t size)
 {
-	int rc = cms_context_alloc(&ctx->cms);
-	if (rc < 0)
-		return;
+	handle_sign_helper(ctx, pollfd, size, 0, false);
+}
 
-	steal_from_cms(ctx->backup_cms, ctx->cms);
-
-	handle_signing(ctx, pollfd, size, 0);
-
-	hide_stolen_goods_from_cms(ctx->cms, ctx->backup_cms);
-	cms_context_fini(ctx->cms);
+static void
+handle_sign_detached_with_file_type(context *ctx, struct pollfd *pollfd, socklen_t size)
+{
+	handle_sign_helper(ctx, pollfd, size, 0, true);
 }
 
 static void
 #if 0
-__attribute__((noreturn))
+NORETURN
 #endif
 handle_invalid_input(pesignd_cmd cmd, context *ctx,
-		     struct pollfd *pollfd __attribute__((__unused__)),
-		     socklen_t size __attribute__((__unused__)))
+		     struct pollfd *pollfd UNUSED,
+		     socklen_t size UNUSED)
 {
 		ctx->backup_cms->log(ctx->backup_cms, ctx->priority|LOG_ERR,
 			"got unexpected command 0x%x", cmd);
@@ -652,6 +743,12 @@ cmd_table_t cmd_table[] = {
 		{ CMD_UNLOCK_TOKEN, handle_unlock_token, "unlock-token", 0 },
 		{ CMD_SIGN_ATTACHED, handle_sign_attached, "sign-attached", 0 },
 		{ CMD_SIGN_DETACHED, handle_sign_detached, "sign-detached", 0 },
+		{ CMD_SIGN_ATTACHED_WITH_FILE_TYPE,
+		  handle_sign_attached_with_file_type,
+		  "sign-attached-with-file-type", 0 },
+		{ CMD_SIGN_DETACHED_WITH_FILE_TYPE,
+		  handle_sign_detached_with_file_type,
+		  "sign-detached-with-file-type", 0 },
 		{ CMD_RESPONSE, NULL, "response",  0 },
 		{ CMD_IS_TOKEN_UNLOCKED, handle_is_token_unlocked,
 			"is-token-unlocked", 0 },
@@ -775,7 +872,7 @@ handle_event(context *ctx, struct pollfd *pollfd)
 
 	if (pm.version != PESIGND_VERSION) {
 		ctx->backup_cms->log(ctx->backup_cms, ctx->priority|LOG_ERR,
-			"got version %d, expected version %d",
+			"got version %#x, expected version %#x",
 			pm.version, PESIGND_VERSION);
 		ctx->backup_cms->log(ctx->backup_cms, ctx->priority|LOG_ERR,
 			"possible exploit attempt.  closing.");
@@ -926,7 +1023,7 @@ get_uid_and_gid(context *ctx, char **homedir)
 }
 
 static void
-quit_handler(int signal __attribute__((__unused__)))
+quit_handler(int signal UNUSED)
 {
 	should_exit = 1;
 }
@@ -974,7 +1071,7 @@ set_up_socket(context *ctx)
 }
 
 static void
-check_socket(context *ctx __attribute__((__unused__)))
+check_socket(context *ctx UNUSED)
 {
 	errno = 0;
 	int rc = access(SOCKPATH, R_OK);
@@ -1018,8 +1115,7 @@ check_socket(context *ctx __attribute__((__unused__)))
 	}
 }
 
-static int
-__attribute__ ((format (printf, 3, 4)))
+static int PRINTF(3, 4)
 daemon_logger(cms_context *cms, int priority, char *fmt, ...)
 {
 	context *ctx = (context *)cms->log_priv;
@@ -1095,8 +1191,10 @@ daemonize(cms_context *cms_ctx, char *certdir, int do_fork)
 			sleep(2);
 			return 0;
 		}
+		ctx.pid = pid;
+	} else {
+		ctx.pid = getpid();
 	}
-	ctx.pid = getpid();
 	write_pid_file(ctx.pid);
 	ctx.backup_cms->log(ctx.backup_cms, ctx.priority|LOG_NOTICE,
 		"pesignd starting (pid %d)", ctx.pid);
@@ -1104,10 +1202,32 @@ daemonize(cms_context *cms_ctx, char *certdir, int do_fork)
 		"pesignd starting (pid %d)", ctx.pid);
 
 	SECStatus status = NSS_Init(certdir);
+	int error = errno;
 	if (status != SECSuccess) {
+		char *globpattern = NULL;
+		rc = asprintf(&globpattern, "%s/cert*.db",
+			      certdir);
+		if (rc > 0) {
+			glob_t globbuf;
+			memset(&globbuf, 0, sizeof(globbuf));
+			rc = glob(globpattern, GLOB_ERR, NULL,
+				  &globbuf);
+			if (rc != 0) {
+				errno = error;
+				ctx.backup_cms->log(ctx.backup_cms,
+					ctx.priority|LOG_NOTICE,
+					"Could not open NSS database (\"%s\"): %m",
+					PORT_ErrorToString(PORT_GetError()));
+				exit(1);
+			}
+		}
+	}
+	if (status != SECSuccess) {
+		errno = error;
 		ctx.backup_cms->log(ctx.backup_cms, ctx.priority|LOG_NOTICE,
-			"Could not initialize nss: %s\n",
-			PORT_ErrorToString(PORT_GetError()));
+				    "Could not initialize nss.\n"
+				    "NSS says \"%s\" errno says \"%m\"\n",
+				    PORT_ErrorToString(PORT_GetError()));
 		exit(1);
 	}
 

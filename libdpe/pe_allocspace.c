@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * pe_allocspace.c - allocate space in the PE binary
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
-
-#include "libdpe.h"
+#include "libdpe_priv.h"
 
 #include <unistd.h>
 #include <sys/mman.h>
@@ -56,12 +43,17 @@ pe_fix_addresses(Pe *pe, int64_t offset)
 int
 pe_set_image_size(Pe *pe)
 {
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	uint32_t image_size = 0;
 	struct pe_hdr *pehdr = pe->state.pe.pehdr;
 	struct pe32plus_opt_hdr *opthdr = pe->state.pe32plus_exe.opthdr;
 
 	Pe_Scn *scn = NULL;
-	struct section_header shdr = { 0, }, tmp_shdr;
+	struct section_header shdr = { "", 0, }, tmp_shdr;
 	if (pehdr->sections < 1)
 		return -1;
 
@@ -86,6 +78,11 @@ pe_set_image_size(Pe *pe)
 int
 pe_extend_file(Pe *pe, size_t size, uint32_t *new_space, int align)
 {
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	void *new = NULL;
 
 	if (align)
@@ -120,6 +117,10 @@ pe_shorten_file(Pe *pe, size_t size)
 {
 	void *new = NULL;
 
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
 	new = mremap(pe->map_address, pe->maximum_size,
 		pe->maximum_size - size, 0);
 	if (new == MAP_FAILED) {
@@ -138,6 +139,11 @@ pe_shorten_file(Pe *pe, size_t size)
 int
 pe_freespace(Pe *pe, uint32_t offset, size_t size)
 {
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	void *addr = compute_mem_addr(pe, offset);
 	memset(addr, '\0', size);
 

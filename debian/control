@@ -2,7 +2,20 @@ Source: pesign
 Priority: optional
 Maintainer: Debian UEFI maintainers <debian-efi@lists.debian.org>
 Uploaders: Daniel Jared Dominguez <Jared_Dominguez@Dell.com>, Steve McIntyre <93sam@debian.org>
-Build-Depends: debhelper (>= 10), pkg-config, libnspr4, libnss3, libnss3-tools, libpopt-dev, coolkey, opensc (>= 0.14.0), libnspr4-dev (>= 4.9.2), libnss3-dev (>= 3.13.6), libefivar-dev (>= 0.14), uuid-dev
+Build-Depends: debhelper (>= 10),
+ pkg-config,
+ libnspr4,
+ libnss3,
+ libnss3-tools,
+ libpopt-dev,
+ mandoc,
+ coolkey,
+ opensc,
+ libnspr4-dev,
+ libnss3-dev,
+ libefivar-dev,
+ libefisec-dev,
+ uuid-dev
 Standards-Version: 4.5.1
 Section: devel
 Homepage: https://github.com/rhinstaller/pesign
@@ -10,9 +23,9 @@ Vcs-Git: https://salsa.debian.org/efi-team/pesign.git
 Vcs-Browser: https://salsa.debian.org/efi-team/pesign
 
 Package: pesign
-Architecture: amd64 i386 armhf arm64 armel
+Architecture: any
 Multi-Arch: foreign
-Depends: ${shlibs:Depends}, ${misc:Depends}, libnss3-tools, coolkey, opensc
+Depends: ${shlibs:Depends}, ${misc:Depends}, libnss3-tools, coolkey, opensc, passwd
 Description: Signing utility for UEFI binaries
  This package contains the pesign utility for signing UEFI binaries (PE-COFF 
  format) as well as other associated tools. It is meant to follow the PE and 

@@ -1,92 +1,117 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011-2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * util.h - a den of scum and miscellany
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
 #ifndef PESIGN_UTIL_H
 #define PESIGN_UTIL_H 1
 
+#include <err.h>
+#include <errno.h>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <stdlib.h>
-#include <errno.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include <libdpe/pe.h>
 
-#define xfree(x) ({if (x) { free(x); x = NULL; }})
+#include "compiler.h"
+#include "list.h"
 
-#define save_errno(x)					\
-	({						\
-		typeof (errno) __saved_errno = errno;	\
-		x;					\
-		errno = __saved_errno;			\
+#ifndef RUNDIR
+#define RUNDIR "/run"
+#endif
+
+extern size_t HIDDEN page_size;
+
+#define xfree(x) ({ if (x) { free(x); x = NULL; } })
+#define xclose(fd) ({ if ((fd) >= 0) { close(fd); (fd) = -1; } })
+#define xopen(path, flags, args...) ({ int fd_ = open(path, flags, ## args); if (fd_ < 0) liberr(1, "Could not open file \"%s\"", arg); fd_; })
+#define xrealloc(o, s) ({ void *o_ = realloc(o, s); if (!o_) liberr(1, "Could not allocate %zd bytes", (size_t)s); o_; })
+#define xcalloc(n, s) ({ void *p_ = calloc(n, s); if (!p_) liberr(1, "Could not allocate %lu entries of %lu bytes", (unsigned long)n, (unsigned long)s); p_; })
+#define xstrdup(s) ({ void *p_ = strdup(s); if (!p_) liberr(1, "Could not allocate memory"); p_; })
+#define xpfstat(path, fd, sb) ({ int rc_ = fstat(fd, sb); if (rc_ < 0) liberr(1, "Could not stat \"%s\"", path); })
+
+#define saved_errno_0_ CONCATENATE(CONCATENATE(error_,__LINE__),_0_)
+#define saved_errno_1_ CONCATENATE(CONCATENATE(error_,__LINE__),_1_)
+#define save_pe_errno() \
+	for (int saved_errno_0_ = 0, saved_errno_1_ = pe_errno(); saved_errno_0_ < 1; saved_errno_0_++, __libdpe_seterrno(saved_errno_1_))
+
+#define conderr(cond, val, fmt, args...) ({				\
+		if (cond)						\
+			err(val, fmt, ## args);				\
 	})
-#define save_pe_errno(x)					\
-	({							\
-		typeof (errno) __saved_errno = pe_errno();	\
-		x;						\
-		__libpe_seterrno(__saved_errno);		\
+#define conderrx(cond, val, fmt, args...) ({				\
+		if (cond)						\
+			errx(val, fmt, ## args);			\
+	})
+
+#define condwarn(cond, fmt, args...) ({					\
+		if (cond)						\
+			warn(fmt, ## args);				\
+	})
+#define condwarnx(cond, fmt, args...) ({				\
+		if (cond)						\
+			warnx(fmt, ## args);				\
 	})
 
 #define nsserr(rv, fmt, args...) ({					\
 		errx((rv), "%s:%s:%d: " fmt ": %s",			\
-			__FILE__, __func__, __LINE__, ##args,		\
+			__FILE__, __func__, __LINE__ - 2, ##args,	\
 			PORT_ErrorToString(PORT_GetError()));		\
+	})
+#define condnsserr(cond, rv, fmt, args...) ({				\
+		if ((cond))						\
+			nsserr(rv, fmt, ## args);			\
 	})
 #define nssreterr(rv, fmt, args...) ({					\
 		fprintf(stderr, "%s:%s:%d: " fmt ": %s\n",		\
-			__FILE__, __func__, __LINE__, ##args,		\
+			__FILE__, __func__, __LINE__ - 2, ##args,	\
 			PORT_ErrorToString(PORT_GetError()));		\
 		return rv;						\
 	})
+#define condnssreterr(cond, rv, fmt, args...) ({			\
+		if ((cond))						\
+			nssreterr(rv, fmt, ## args);			\
+	})
 #define liberr(rv, fmt, args...) ({					\
 		err((rv), "%s:%s:%d: " fmt,				\
-			__FILE__, __func__, __LINE__, ##args);		\
+			__FILE__, __func__, __LINE__ - 2, ##args);	\
 	})
 #define libreterr(rv, fmt, args...) ({					\
 		fprintf(stderr, "%s:%s:%d: " fmt ": %m\n",		\
-			__FILE__, __func__, __LINE__, ##args);		\
+			__FILE__, __func__, __LINE__ - 2, ##args);	\
 		return rv;						\
 	})
 #define peerr(rv, fmt, args...) ({					\
 		errx((rv), "%s:%s:%d: " fmt ": %s",			\
-			__FILE__, __func__, __LINE__, ##args,		\
+			__FILE__, __func__, __LINE__ - 2, ##args,	\
 			pe_errmsg(pe_errno()));				\
 	})
 #define pereterr(rv, fmt, args...) ({					\
 		fprintf(stderr, "%s:%s:%d: " fmt ": %s\n",		\
-			__FILE__, __func__, __LINE__, ##args,		\
+			__FILE__, __func__, __LINE__ - 2, ##args,	\
 			pe_errmsg(pe_errno()));				\
 		return rv;						\
 	})
 
-static inline int
-__attribute__ ((unused))
+static inline int UNUSED
 read_file(int fd, char **bufp, size_t *lenptr) {
-    int alloced = 0, size = 0, i = 0;
+    size_t alloced = 0, size = 0;
+    ssize_t i = 0;
     char * buf = NULL;
 
     do {
 	size += i;
-	if ((size + 1024) > alloced) {
-	    alloced += 4096;
-	    buf = realloc(buf, alloced + 1);
+	if ((size + (page_size >> 2)) > alloced) {
+	    alloced += page_size;
+	    buf = xrealloc(buf, ALIGN_UP(alloced + 1, page_size));
 	}
-    } while ((i = read(fd, buf + size, 1024)) > 0);
+    } while ((i = read(fd, buf + size, page_size >> 2)) > 0);
 
     if (i < 0) {
         free(buf);
@@ -97,6 +122,26 @@ read_file(int fd, char **bufp, size_t *lenptr) {
     *lenptr = size;
 
     return 0;
+}
+
+static inline int UNUSED
+write_file(int fd, const void *data, size_t len)
+{
+	int rc;
+	size_t written = 0;
+
+	while (written < len) {
+		rc = write(fd, ((unsigned char *) data) + written,
+			   len - written);
+		if (rc < 0) {
+			if (errno == EINTR)
+				continue;
+			return rc;
+		}
+		written += rc;
+	}
+
+	return 0;
 }
 
 static int
@@ -133,15 +178,13 @@ compare_shdrs (const void *a, const void *b)
 	return 0;
 }
 
-static void
-__attribute__ ((unused))
+static void UNUSED
 sort_shdrs (struct section_header *shdrs, size_t sections)
 {
 	qsort(shdrs, sections, sizeof(*shdrs), compare_shdrs);
 }
 
-static void
-__attribute__ ((unused))
+static void UNUSED
 free_poison(void  *addrv, ssize_t len)
 {
 	uint8_t *addr = addrv;
@@ -150,8 +193,7 @@ free_poison(void  *addrv, ssize_t len)
 		addr[x] = poison_pills[x % 2];
 }
 
-static int
-__attribute__ ((unused))
+static int UNUSED
 content_is_empty(uint8_t *data, ssize_t len)
 {
 	if (len < 1)
@@ -163,34 +205,92 @@ content_is_empty(uint8_t *data, ssize_t len)
 	return 1;
 }
 
-#if defined(DAEMON_H)
-static inline uint32_t
-__attribute__ ((unused))
-pesignd_string_size(char *buffer)
-{
-	pesignd_string *s;
-	return sizeof(s->size) + (buffer ? strlen(buffer) : 0) + 1;
-}
+#define define_input_file(fname, name, descr)                           \
+        static void                                                     \
+        CAT3(open_, fname, _input)(pesign_context *ctx)                 \
+        {                                                               \
+                conderrx(!ctx->name, 1,                                 \
+                         "No input file specified for %s",              \
+                         descr);                                        \
+                ctx->CAT(name, fd) =                                    \
+                        open(ctx->name, O_RDONLY|O_CLOEXEC);            \
+                conderr(ctx->CAT(name, fd) < 0, 1,                      \
+                        "Error opening %s file \"%s\" for input",       \
+                        descr, ctx->name);                              \
+        }                                                               \
+        static void                                                     \
+        CAT3(close_, fname, _input)(pesign_context *ctx)                \
+        {                                                               \
+                close(ctx->CAT(name, fd));                              \
+                ctx->CAT(name, fd) = -1;                                \
+        }
+
+#define define_output_file(fname, name, descr)                          \
+        static void                                                     \
+        CAT3(open_, fname, _output)(pesign_context *ctx)                \
+        {                                                               \
+                conderrx(!ctx->name, 1,                                 \
+                         "No output file specified for %s.",            \
+                         descr);                                        \
+                                                                        \
+                if (access(ctx->name, F_OK) == 0 && ctx->force == 0)    \
+                        errx(1,                                         \
+                             "\"%s\" exists and --force was not given.",\
+                             ctx->name);                                \
+                                                                        \
+                ctx->CAT(name, fd) =                                    \
+                        open(ctx->name,                                 \
+                             O_RDWR|O_CREAT|O_TRUNC|O_CLOEXEC,          \
+                             ctx->outmode);                             \
+                conderr(ctx->CAT(name, fd) < 0, 1,                      \
+                        "Error opening %s file \"%s\" for output",      \
+                        descr, ctx->name);                              \
+        }                                                               \
+        static void                                                     \
+        CAT3(close_, fname, _output)(pesign_context *ctx)               \
+        {                                                               \
+                close(ctx->CAT(name,fd));                               \
+                ctx->CAT(name,fd) = -1;                                 \
+        }
 
 static inline void
-__attribute__ ((unused))
-pesignd_string_set(pesignd_string *str, char *value)
+proxy_fd_mode(int fd, char *infile, mode_t *outmode, size_t *inlength)
 {
-	str->size = (value ? strlen(value) : 0) + 1;
-	if (value)
-		strcpy((char *)str->value, value);
-	else
-		str->value[0] = '\0';
+	struct stat statbuf;
+	int rc;
+
+	rc = fstat(fd, &statbuf);
+	conderr(rc < 0, 1, "Could not fstat \"%s\"", infile);
+	if (outmode)
+		*outmode = statbuf.st_mode;
+	if (inlength)
+		*inlength = statbuf.st_size;
 }
 
-static inline pesignd_string *
-__attribute__ ((unused))
-pesignd_string_next(pesignd_string *str)
-{
-	char *buffer = (char *)str;
-	buffer += sizeof(str->size) + str->size;
-	return (pesignd_string *)buffer;
-}
-#endif /* defined(DAEMON_H) */
+extern long verbosity(void);
+
+#define dbgprintf_(tv, file, func, line, fmt, args...) ({	\
+		struct timeval tv;				\
+		gettimeofday(&tv, NULL);			\
+		warnx("%ld.%lu %s:%s():%d: " fmt,		\
+		      tv.tv_sec, tv.tv_usec,			\
+		      file, func, line, ##args);		\
+	})
+#if defined(PESIGN_DEBUG)
+#define dbgprintf(fmt, args...)					\
+	dbgprintf_(CAT(CAT(CAT(tv_,__COUNTER__),__LINE__),_),	\
+		   __FILE__, __func__, __LINE__ - 2, fmt, ##args)
+#else
+#define dbgprintf(fmt, args...) ({						\
+		if (verbosity() > 1)						\
+			dbgprintf_(CAT(CAT(CAT(tv_,__COUNTER__),__LINE__),_),	\
+				 __FILE__, __func__, __LINE__ - 3,		\
+				 fmt, ##args);					\
+		0;								\
+	})
+#endif
+#define ingress() dbgprintf("ingress");
+#define egress() dbgprintf("egress");
 
 #endif /* PESIGN_UTIL_H */
+// vim:fenc=utf-8:tw=75:noet

@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * oid.h - helpers for OID usage
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
 #ifndef OID_H
 #define OID_H 1
@@ -25,6 +13,8 @@ typedef enum {
 	SPC_PE_IMAGE_DATA_OBJID,		/* 1.3.6.1.4.1.311.2.1.15 */
 	SPC_INDIVIDUAL_SP_KEY_PURPOSE_OBJID,	/* 1.3.6.1.4.1.311.2.1.21 */
 	szOID_CERTSRV_CA_VERSION,		/* 1.3.6.1.4.1.311.21.1 */
+	SHIM_EKU_MODULE_SIGNING_ONLY,		/* 1.3.6.1.4.1.2312.16.1.2 */
+	SPC_UEFI_SB_CA,				/* 1.3.6.1.4.1.311.80.2.1 */
 	END_OID_LIST
 } ms_oid_t;
 

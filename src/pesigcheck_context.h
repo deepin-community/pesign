@@ -1,25 +1,14 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * pesigcheck_context.h - context setup and teardown for pesigcheck
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
 #ifndef pesigcheck_CONTEXT_H
 #define pesigcheck_CONTEXT_H 1
 
 #include <cert.h>
+#include <efivar.h>
 #include <secpkcs7.h>
 
 enum {
@@ -34,6 +23,7 @@ typedef enum {
 
 struct dblist {
 	db_f_type type;
+	char *path;
 	int fd;
 	struct dblist *next;
 	size_t size;
@@ -60,6 +50,7 @@ typedef struct pesigcheck_context {
 	Pe *inpe;
 
 	int quiet;
+	long verbose;
 
 	hashlist *hashes;
 

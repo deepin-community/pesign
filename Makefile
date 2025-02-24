@@ -4,27 +4,29 @@ TOPDIR = $(realpath .)
 include $(TOPDIR)/Make.version
 include $(TOPDIR)/Make.rules
 include $(TOPDIR)/Make.defaults
+include $(TOPDIR)/Make.coverity
+include $(TOPDIR)/Make.scan-build
 
 SUBDIRS := include libdpe src
 
 install :
 	$(INSTALL) -d -m 755 $(INSTALLROOT)$(docdir)/pesign-$(VERSION)/
 	$(INSTALL) -pm 644 COPYING $(INSTALLROOT)$(docdir)/pesign-$(VERSION)/
-	@set -e ; for x in $(SUBDIRS) ; do \
-		$(MAKE) -C $$x $@ ; \
-	done
+	@$(call descend)
 
 install_systemd install_sysvinit : install
-	@set -e ; for x in $(SUBDIRS) ; do \
-		$(MAKE) -C $$x $@ ; \
-	done
+	@$(call descend)
 
 distclean : | clean
 
+clean :
+	@$(call removes)
+	@$(call descend)
+
 clean deps all : | Make.version
-	@set -e ; for x in $(SUBDIRS) ; do \
-		$(MAKE) -C $$x $@ ; \
-	done
+
+deps all :
+	@$(call descend)
 
 $(SUBDIRS) :
 	$(MAKE) -C $@ all
@@ -44,7 +46,7 @@ test-archive:
 	@echo "The archive is in pesign-$(VERSION).tar.bz2"
 
 tag:
-	git tag -s $(GITTAG) refs/heads/master
+	git tag -s $(GITTAG) refs/heads/main
 
 archive: tag
 	@rm -rf /tmp/pesign-$(VERSION) /tmp/pesign-$(VERSION)-tmp
@@ -55,4 +57,12 @@ archive: tag
 	@rm -rf /tmp/pesign-$(VERSION)
 	@echo "The archive is in pesign-$(VERSION).tar.bz2"
 
+valgrind : all
+	valgrind --leak-check=full --track-origins=yes ./src/pesign -f -s -t 'Secure Boot Signer' -c 'Certificate for Digital Signature' -i shimx64.efi -o shimx64.signed.efi --pwfile pwfile
 
+strace : all
+	strace -tt -s 1024 -v -f -o pesign.strace -o /dev/stdout ./src/pesign -f -s -t 'Secure Boot Signer' -c 'Certificate for Digital Signature' -i shimx64.efi -o shimx64.signed.efi --pwfile pwfile
+
+gdb : all
+	echo run -f -s -t \'Secure Boot Signer\' -c \'Certificate for Digital Signature\' -i shimx64.efi -o shimx64.signed.efi --pwfile pwfile | copy
+	gdb ./src/pesign
