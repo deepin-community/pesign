@@ -1,29 +1,23 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * pe_addcert.c - helpers to manage the PE cert directory
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
 #include <unistd.h>
-#include "libdpe.h"
+
+#include "libdpe_priv.h"
 
 int
 pe_clearcert(Pe *pe)
 {
 	int rc;
 	data_directory *dd = NULL;
+
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
 
 	rc = pe_getdatadir(pe, &dd);
 	if (rc < 0)
@@ -42,6 +36,11 @@ pe_alloccert(Pe *pe, size_t size)
 {
 	int rc;
 	data_directory *dd = NULL;
+
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
 
 	pe_clearcert(pe);
 
@@ -69,6 +68,12 @@ pe_populatecert(Pe *pe, void *cert, size_t size)
 {
 	int rc;
 	data_directory *dd = NULL;
+
+	if (!pe) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	rc = pe_getdatadir(pe, &dd);
 	if (rc < 0)
 		return rc;

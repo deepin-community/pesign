@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011-2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * signed_data.c - implement the authenticode signed_data structure
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
 #include <stdio.h>
 #include <string.h>
@@ -59,7 +47,7 @@ err_list:
 }
 
 void
-free_algorithm_list(cms_context *cms __attribute__((__unused__)),
+free_algorithm_list(cms_context *cms UNUSED,
 		    SECAlgorithmID **algorithm_list)
 {
 	if (!algorithm_list)
@@ -81,14 +69,18 @@ generate_certificate_list(cms_context *cms, SECItem ***certificate_list_p)
 
 	certificates = PORT_ArenaZAlloc(cms->arena, sizeof (SECItem *) * 3);
 	if (!certificates) {
-		save_port_err(PORT_ArenaRelease(cms->arena, mark));
+		save_port_err() {
+			PORT_ArenaRelease(cms->arena, mark);
+		}
 		cmsreterr(-1, cms, "could not allocate certificate list");
 	}
 	int i = 0;
 
 	certificates[i] = PORT_ArenaZAlloc(cms->arena, sizeof (SECItem));
 	if (!certificates[i]) {
-		save_port_err(PORT_ArenaRelease(cms->arena, mark));
+		save_port_err() {
+			PORT_ArenaRelease(cms->arena, mark);
+		}
 		cmsreterr(-1, cms, "could not allocate certificate entry");
 	}
 	SECITEM_CopyItem(cms->arena, certificates[i++], &cms->cert->derCert);
@@ -106,8 +98,9 @@ generate_certificate_list(cms_context *cms, SECItem ***certificate_list_p)
 				certificates[i] = PORT_ArenaZAlloc(cms->arena,
 							sizeof (SECItem));
 				if (!certificates[i]) {
-					save_port_err(
-						PORT_ArenaRelease(cms->arena, mark));
+					save_port_err() {
+						PORT_ArenaRelease(cms->arena, mark);
+					}
 					cmsreterr(-1, cms,"could not allocate "
 						"certificate entry");
 				}
@@ -119,6 +112,7 @@ generate_certificate_list(cms_context *cms, SECItem ***certificate_list_p)
 	}
 
 	*certificate_list_p = certificates;
+	PORT_ArenaUnmark(cms->arena, mark);
 	return 0;
 }
 
@@ -132,7 +126,8 @@ int
 generate_signerInfo_list(cms_context *cms, SpcSignerInfo ***signerInfo_list_p, SignerInfoType type)
 {
 	SpcSignerInfo **signerInfo_list;
-	int err, rc;
+	int err = 0;
+	int rc;
 
 	if (!signerInfo_list_p)
 		return -1;
@@ -274,22 +269,28 @@ generate_spc_signed_data(cms_context *cms, SECItem *sdp)
 	void *mark = PORT_ArenaMark(cms->arena);
 
 	if (SEC_ASN1EncodeInteger(cms->arena, &sd.version, 1) == NULL) {
-		save_port_err(PORT_ArenaRelease(cms->arena, mark));
+		save_port_err() {
+			PORT_ArenaRelease(cms->arena, mark);
+		}
+		cms->ci_digest = NULL;
 		cmsreterr(-1, cms, "could not encode integer");
 	}
 
 	if (generate_algorithm_id_list(cms, &sd.algorithms) < 0) {
 		PORT_ArenaRelease(cms->arena, mark);
+		cms->ci_digest = NULL;
 		return -1;
 	}
 
 	if (generate_spc_content_info(cms, &sd.cinfo) < 0) {
 		PORT_ArenaRelease(cms->arena, mark);
+		cms->ci_digest = NULL;
 		return -1;
 	}
 
 	if (generate_certificate_list(cms, &sd.certificates) < 0) {
 		PORT_ArenaRelease(cms->arena, mark);
+		cms->ci_digest = NULL;
 		return -1;
 	}
 
@@ -297,13 +298,17 @@ generate_spc_signed_data(cms_context *cms, SECItem *sdp)
 
 	if (generate_signerInfo_list(cms, &sd.signerInfos, PE_SIGNER_INFO) < 0) {
 		PORT_ArenaRelease(cms->arena, mark);
+		cms->ci_digest = NULL;
 		return -1;
 	}
 
 	SECItem encoded = { 0, };
 	if (SEC_ASN1EncodeItem(cms->arena, &encoded, &sd, SignedDataTemplate)
 			== NULL) {
-		save_port_err(PORT_ArenaRelease(cms->arena, mark));
+		save_port_err() {
+			PORT_ArenaRelease(cms->arena, mark);
+		}
+		cms->ci_digest = NULL;
 		cmsreterr(-1, cms, "could not encode SignedData");
 	}
 
@@ -318,7 +323,10 @@ generate_spc_signed_data(cms_context *cms, SECItem *sdp)
 	SECItem wrapper = { 0, };
 	if (SEC_ASN1EncodeItem(cms->arena, &wrapper, &sdw,
 			ContentInfoTemplate) == NULL) {
-		save_port_err(PORT_ArenaRelease(cms->arena, mark));
+		save_port_err() {
+			PORT_ArenaRelease(cms->arena, mark);
+		}
+		cms->ci_digest = NULL;
 		cmsreterr(-1, cms, "could not encode SignedData");
 	}
 
@@ -339,7 +347,9 @@ generate_authvar_signed_data(cms_context *cms, SECItem *sdp)
 	void *mark = PORT_ArenaMark(cms->arena);
 
 	if (SEC_ASN1EncodeInteger(cms->arena, &sd.version, 1) == NULL) {
-		save_port_err(PORT_ArenaRelease(cms->arena, mark));
+		save_port_err() {
+			PORT_ArenaRelease(cms->arena, mark);
+		}
 		cmsreterr(-1, cms, "could not encode integer");
 	}
 
@@ -368,7 +378,9 @@ generate_authvar_signed_data(cms_context *cms, SECItem *sdp)
 	SECItem encoded = { 0, };
 	if (SEC_ASN1EncodeItem(cms->arena, &encoded, &sd, SignedDataTemplate)
 			== NULL) {
-		save_port_err(PORT_ArenaRelease(cms->arena, mark));
+		save_port_err() {
+			PORT_ArenaRelease(cms->arena, mark);
+		}
 		cmsreterr(-1, cms, "could not encode SignedData");
 	}
 
@@ -383,7 +395,9 @@ generate_authvar_signed_data(cms_context *cms, SECItem *sdp)
 	SECItem wrapper = { 0, };
 	if (SEC_ASN1EncodeItem(cms->arena, &wrapper, &sdw,
 			ContentInfoTemplate) == NULL) {
-		save_port_err(PORT_ArenaRelease(cms->arena, mark));
+		save_port_err() {
+			PORT_ArenaRelease(cms->arena, mark);
+		}
 		cmsreterr(-1, cms, "could not encode SignedData");
 	}
 
@@ -391,3 +405,5 @@ generate_authvar_signed_data(cms_context *cms, SECItem *sdp)
 	PORT_ArenaUnmark(cms->arena, mark);
 	return 0;
 }
+
+// vim:fenc=utf-8:tw=75:noet

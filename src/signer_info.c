@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * signer_info.c - implement the authenticode signer_info structure
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
-
 #include "pesign.h"
 
 #include <string.h>
@@ -173,15 +160,14 @@ sign_blob(cms_context *cms, SECItem *sigitem, SECItem *sign_content)
 	if (!oid)
 		goto err;
 
-	PK11_SetPasswordFunc(cms->func ? cms->func : readpw);
-	SECKEYPrivateKey *privkey = PK11_FindKeyByAnyCert(cms->cert,
-				cms->pwdata ? cms->pwdata : NULL);
+	PK11_SetPasswordFunc(cms->func ? cms->func : SECU_GetModulePassword);
+	SECKEYPrivateKey *privkey = PK11_FindKeyByAnyCert(cms->cert, cms);
 	if (!privkey) {
 		cms->log(cms, LOG_ERR, "could not get private key: %s",
 			PORT_ErrorToString(PORT_GetError()));
 		goto err;
 	}
-	
+
 	SECItem *signature, tmp;
 	memset (&tmp, '\0', sizeof (tmp));
 
@@ -446,3 +432,5 @@ generate_authvar_signer_info(cms_context *cms, SpcSignerInfo *sip)
 err:
 	return -1;
 }
+
+// vim:fenc=utf-8:tw=75:noet

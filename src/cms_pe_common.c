@@ -1,21 +1,10 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011-2013 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * cms_pe_common.c - common decls for the PE CMS implementation
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
+#include "fix_coverity.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -41,32 +30,104 @@
 #include <certt.h>
 
 static int
-check_pointer_and_size(Pe *pe, void *ptr, size_t size)
+check_pointer_and_size(cms_context *cms, Pe *pe, void *ptr, size_t size)
 {
 	void *map = NULL;
 	size_t map_size = 0;
+	unsigned long p, m;
+
+	map = pe_rawfile(pe, &map_size);
+	if (!map || map_size < 1)
+		cmsreterr(0, cms, "mmap is %p mmap size is %zd end is %p",
+			  map, map_size, (void *)((uintptr_t)map + map_size));
+
+	p = (unsigned long)(uintptr_t)ptr;
+	m = (unsigned long)(uintptr_t)map;
+
+	if (p < m)
+		cmsreterr(0, cms, "pointer %p is below mmap at %p", ptr, map);
+
+	if (p + size > m + map_size)
+		cmsreterr(0, cms,
+			  "pointer %p is above mmap end at %p (%lu is %lu bytes past EOF at %zu)",
+			  (void *)((uintptr_t)p + size),
+			  (void *)((uintptr_t)m + map_size),
+			  p + size - m,
+			  p + size - (m + map_size),
+			  map_size);
+
+	return 1;
+}
+
+static void *
+get_strtab(cms_context *cms, Pe *pe)
+{
+	static void *ret = NULL;
+	uint32_t *ptr;
+	intptr_t intret = 0;
+	struct pe_hdr pehdr;
+	void *map = NULL;
+	size_t map_size = 0;
+
+	if (ret)
+		return ret;
+
+	if (pe_getpehdr(pe, &pehdr) == NULL)
+		pereterr(NULL, "invalid PE file header");
 
 	map = pe_rawfile(pe, &map_size);
 	if (!map || map_size < 1)
 		return 0;
 
-	if ((uintptr_t)ptr < (uintptr_t)map)
-		return 0;
+	if (pehdr.symbol_table == 0)
+		return NULL;
 
-	if ((uintptr_t)ptr + size > (uintptr_t)map + map_size)
-		return 0;
+	intret = (intptr_t)pehdr.symbol_table;
+	intret += pehdr.symbols * sizeof(struct pe_symtab_entry);
 
-	if (ptr <= map && size >= map_size)
-		return 0;
+	ptr = (uint32_t *)((intptr_t)map + intret);
+	if (!check_pointer_and_size(cms, pe, ptr, 4))
+		pereterr(NULL, "invalid string table start");
 
-	return 1;
+	if (!check_pointer_and_size(cms, pe, ptr, *ptr))
+		pereterr(NULL, "invalid string table size");
+	ret = ptr;
+	return ret;
 }
 
-#if 1
-#define dprintf(fmt, ...)
-#else
-#define dprintf(fmt, args...) printf(fmt, ## args)
-#endif
+static char *
+get_str(cms_context *cms, Pe *pe, char *strnum)
+{
+	size_t sz;
+	unsigned long num;
+	char *strtab;
+	uint32_t strtabsz;
+
+	/* no idea what the real max size for these is, so... we're not going
+	 * to have 4B strings, and this can't be the end of the binary, so
+	 * this is big enough. */
+	sz = strnlen(strnum, 11);
+	if (sz == 11)
+		return NULL;
+
+	errno = 0;
+	num = strtoul(strnum, NULL, 10);
+	if (errno != 0)
+		return NULL;
+
+	strtab = get_strtab(cms, pe);
+	if (!strtab)
+		return NULL;
+
+	strtabsz = *(uint32_t *)strtab;
+	if (num >= strtabsz)
+		return NULL;
+
+	if (strnlen(&strtab[num], strtabsz - num) > strtabsz - num - 1)
+		return NULL;
+
+	return &strtab[num];
+}
 
 int
 generate_digest(cms_context *cms, Pe *pe, int padded)
@@ -76,6 +137,7 @@ generate_digest(cms_context *cms, Pe *pe, int padded)
 	struct pe32_opt_hdr *pe32opthdr = NULL;
 	struct pe32plus_opt_hdr *pe64opthdr = NULL;
 	unsigned long hashed_bytes = 0;
+	void *opthdr;
 	int rc = -1;
 
 	if (!pe) {
@@ -98,22 +160,25 @@ generate_digest(cms_context *cms, Pe *pe, int padded)
 	 * 2. Initialize SHA hash context. */
 	map = pe_rawfile(pe, &map_size);
 	if (!map)
-		pereterr(-1, "could not get raw output file address");
+		cmsreterr(-1, cms, "could not get raw output file address");
 
 	/* 3. Calculate the distance from the base of the image header to the
 	 * image checksum.
 	 * 4. Hash the image header from start to the beginning of the
 	 * checksum. */
 	hash_base = map;
+
+	opthdr = pe_getopthdr(pe);
+	if (opthdr == NULL)
+		cmsgotoerr(error, cms, "PE header is invalid");
+
 	switch (pe_kind(pe)) {
 	case PE_K_PE_EXE: {
-		void *opthdr = pe_getopthdr(pe);
 		pe32opthdr = opthdr;
 		hash_size = (uintptr_t)&pe32opthdr->csum - (uintptr_t)hash_base;
 		break;
 	}
 	case PE_K_PE64_EXE: {
-		void *opthdr = pe_getopthdr(pe);
 		pe64opthdr = opthdr;
 		hash_size = (uintptr_t)&pe64opthdr->csum - (uintptr_t)hash_base;
 		break;
@@ -121,13 +186,10 @@ generate_digest(cms_context *cms, Pe *pe, int padded)
 	default:
 		goto error;
 	}
-	if (!check_pointer_and_size(pe, hash_base, hash_size)) {
-		cms->log(cms, LOG_ERR, "%s:%s:%d PE header is invalid",
-			__FILE__, __func__, __LINE__);
-		goto error;
-	}
-	dprintf("beginning of hash\n");
-	dprintf("digesting %lx + %lx\n", hash_base - map, hash_size);
+	if (!check_pointer_and_size(cms, pe, hash_base, hash_size))
+		cmsgotoerr(error, cms, "PE header is invalid");
+	dbgprintf("beginning of hash");
+	dbgprintf("digesting %tx + %zx", hash_base - map, hash_size);
 	generate_digest_step(cms, hash_base, hash_size);
 
 	/* 5. Skip over the image checksum
@@ -139,20 +201,15 @@ generate_digest(cms_context *cms, Pe *pe, int padded)
 	data_directory *dd;
 
 	rc = pe_getdatadir(pe, &dd);
-	if (rc < 0 || !dd || !check_pointer_and_size(pe, dd, sizeof(*dd))) {
-		cms->log(cms, LOG_ERR, "%s:%s:%d PE data directory is invalid",
-			__FILE__, __func__, __LINE__);
-		goto error;
-	}
+	if (rc < 0 || !dd || !check_pointer_and_size(cms, pe, dd, sizeof(*dd)))
+		cmsgotoerr(error, cms, "PE data directory is invalid");
 
 	hash_size = (uintptr_t)&dd->certs - (uintptr_t)hash_base;
-	if (!check_pointer_and_size(pe, hash_base, hash_size)) {
-		cms->log(cms, LOG_ERR, "%s:%s:%d PE data directory is invalid",
-			__FILE__, __func__, __LINE__);
-		goto error;
-	}
+	if (!check_pointer_and_size(cms, pe, hash_base, hash_size))
+		cmsgotoerr(error, cms, "PE data directory is invalid");
+
 	generate_digest_step(cms, hash_base, hash_size);
-	dprintf("digesting %lx + %lx\n", hash_base - map, hash_size);
+	dbgprintf("digesting %tx + %zx", hash_base - map, hash_size);
 
 	/* 8. Skip over the crt dir
 	 * 9. Hash everything up to the end of the image header. */
@@ -161,13 +218,11 @@ generate_digest(cms_context *cms, Pe *pe, int padded)
 				: pe64opthdr->header_size) -
 		((uintptr_t)&dd->base_relocations - (uintptr_t)map);
 
-	if (!check_pointer_and_size(pe, hash_base, hash_size)) {
-		cms->log(cms, LOG_ERR, "%s:%s:%d PE relocations table is "
-			"invalid", __FILE__, __func__, __LINE__);
-		goto error;
-	}
+	if (!check_pointer_and_size(cms, pe, hash_base, hash_size))
+		cmsgotoerr(error, cms, "PE relocations table is invalid");
+
 	generate_digest_step(cms, hash_base, hash_size);
-	dprintf("digesting %lx + %lx\n", hash_base - map, hash_size);
+	dbgprintf("digesting %tx + %zx", hash_base - map, hash_size);
 
 	/* 10. Set SUM_OF_BYTES_HASHED to the size of the header. */
 	hashed_bytes = pe32opthdr ? pe32opthdr->header_size
@@ -192,15 +247,25 @@ generate_digest(cms_context *cms, Pe *pe, int padded)
 		hash_base = (void *)((uintptr_t)map + shdrs[i].data_addr);
 		hash_size = shdrs[i].raw_data_size;
 
-		if (!check_pointer_and_size(pe, hash_base, hash_size)) {
-			cms->log(cms, LOG_ERR, "%s:%s:%d PE section \"%s\" "
-				"has invalid address",
-				__FILE__, __func__, __LINE__, shdrs[i].name);
-			goto error_shdrs;
+		if (!check_pointer_and_size(cms, pe, hash_base, hash_size))
+			cmsgotoerr(error_shdrs, cms,
+				   "PE section \"%s\" has invalid address",
+				   shdrs[i].name);
+
+		if (cms->omit_vendor_cert) {
+			char *name = shdrs[i].name;
+			if (name && name[0] == '/')
+				name = get_str(cms, pe, name + 1);
+			dbgprintf("section:\"%s\"", name ? name : "(null)");
+			if (name && !strcmp(name, ".vendor_cert")) {
+				dbgprintf("skipping .vendor_cert section");
+				hashed_bytes += hash_size;
+				continue;
+			}
 		}
 
 		generate_digest_step(cms, hash_base, hash_size);
-		dprintf("digesting %lx + %lx\n", hash_base - map, hash_size);
+		dbgprintf("digesting %tx + %zx", hash_base - map, hash_size);
 
 		hashed_bytes += hash_size;
 	}
@@ -209,11 +274,10 @@ generate_digest(cms_context *cms, Pe *pe, int padded)
 		hash_base = (void *)((uintptr_t)map + hashed_bytes);
 		hash_size = map_size - dd->certs.size - hashed_bytes;
 
-		if (!check_pointer_and_size(pe, hash_base, hash_size)) {
-			cms->log(cms, LOG_ERR, "%s:%s:%d PE has invalid "
-				"trailing data", __FILE__, __func__, __LINE__);
-			goto error_shdrs;
-		}
+		if (!check_pointer_and_size(cms, pe, hash_base, hash_size))
+			cmsgotoerr(error_shdrs, cms,
+				   "PE has invalid trailing data");
+
 		if (hash_size % 8 != 0 && padded) {
 			size_t tmp_size = hash_size +
 					  ALIGNMENT_PADDING(hash_size, 8);
@@ -221,13 +285,15 @@ generate_digest(cms_context *cms, Pe *pe, int padded)
 			memset(tmp_array, '\0', tmp_size);
 			memcpy(tmp_array, hash_base, hash_size);
 			generate_digest_step(cms, tmp_array, tmp_size);
-			dprintf("digesting %lx + %lx\n", (unsigned long)tmp_array, tmp_size);
+			dbgprintf("digesting %tx + %zx", (ptrdiff_t)tmp_array,
+				tmp_size);
 		} else {
 			generate_digest_step(cms, hash_base, hash_size);
-			dprintf("digesting %lx + %lx\n", hash_base - map, hash_size);
+			dbgprintf("digesting %tx + %zx", hash_base - map,
+				hash_size);
 		}
 	}
-	dprintf("end of hash\n");
+	dbgprintf("end of hash");
 
 	rc = generate_digest_finish(cms);
 	if (rc < 0)
@@ -247,4 +313,4 @@ error:
 	return -1;
 }
 
-
+// vim:fenc=utf-8:tw=75:noet

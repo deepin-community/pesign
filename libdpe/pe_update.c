@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * pe_update.c - routes to update the PE binary
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
-
-#include "libdpe.h"
+#include "libdpe_priv.h"
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -99,7 +86,7 @@ pe_update(Pe *pe, Pe_Cmd cmd)
 
 	off_t size = __pe_updatenull(pe, shnum);
 
-	if (size != -1 && (cmd == PE_C_WRITE || PE_C_WRITE_MMAP)) {
+	if (size != -1 && (cmd == PE_C_WRITE || cmd == PE_C_WRITE_MMAP)) {
 		if (pe->cmd != PE_C_RDWR && pe->cmd != PE_C_RDWR_MMAP &&
 				pe->cmd != PE_C_WRITE &&
 				pe->cmd != PE_C_WRITE_MMAP) {

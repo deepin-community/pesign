@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * pe_begin.c - read the PE objects from the media
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
-
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -27,22 +14,22 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-#include "libdpe.h"
+#include "libdpe_priv.h"
 
 static inline Pe *
-file_read_pe_obj(int fildes __attribute__((__unused__)),
-		 void *map_address __attribute__((__unused__)),
-		 unsigned char *p_ident __attribute__((__unused__)),
-		 size_t maxsize __attribute__((__unused__)),
-		 Pe_Cmd cmd __attribute__((__unused__)),
-		 Pe *parent __attribute__((__unused__)))
+file_read_pe_obj(int fildes UNUSED,
+		 void *map_address UNUSED,
+		 unsigned char *p_ident UNUSED,
+		 size_t maxsize UNUSED,
+		 Pe_Cmd cmd UNUSED,
+		 Pe *parent UNUSED)
 {
 	return NULL;
 }
 
 static inline Pe *
 file_read_pe_exe(int fildes, void *map_address, unsigned char *p_ident,
-		 size_t maxsize, Pe_Cmd cmd __attribute__((__unused__)),
+		 size_t maxsize, Pe_Cmd cmd UNUSED,
 		 Pe *parent)
 {
 	Pe_Kind kind = determine_kind(p_ident, maxsize);
@@ -156,6 +143,9 @@ __libpe_read_mmapped_file(int fildes, void *map_address, size_t maxsize,
 		case PE_K_PE_EXE:
 			return file_read_pe_exe(fildes, map_address, p_ident,
 						maxsize, cmd, parent);
+		case PE_K_MZ:
+			errno = ENOSYS;
+			return NULL;
 		default:
 			break;
 	}
@@ -171,8 +161,14 @@ read_unmmapped_file(int fildes, size_t maxsize, Pe_Cmd cmd, Pe *parent)
 		struct {
 			struct mz_hdr mz;
 			struct pe_hdr pe;
+			union {
+				struct pe32_opt_hdr opt_hdr_32;
+				struct pe32plus_opt_hdr opt_hdr_64;
+			};
 		};
-		unsigned char raw[1];
+		unsigned char raw[sizeof(struct mz_hdr)
+				  + sizeof(struct pe_hdr)
+				  + sizeof(struct pe32plus_opt_hdr)];
 	} mem;
 
 	ssize_t nread = pread_retry (fildes, &mem.mz, sizeof(mem.mz), 0);
@@ -279,11 +275,13 @@ write_file (int fd, Pe_Cmd cmd)
 }
 
 static Pe *
-dup_pe(int fildes, Pe_Cmd cmd __attribute__((__unused__)), Pe *ref)
+dup_pe(int fildes, Pe_Cmd cmd UNUSED, Pe *ref)
 {
 	if (fildes == -1) {
 		fildes = ref->fildes;
-	} else if (ref->fildes != -1 && fildes != ref->fildes) {
+	}
+
+	if (ref->fildes != -1 && fildes != ref->fildes) {
 		__libpe_seterrno(PE_E_FD_MISMATCH);
 		return NULL;
 	}

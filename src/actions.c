@@ -1,21 +1,10 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011-2012 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * actions.c - pesign's main actions
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
+#include "fix_coverity.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -40,16 +29,16 @@
 static int saw_content;
 
 static void
-handle_bytes(void *arg __attribute__((__unused__)),
-	     const char *buf __attribute__((__unused__)),
-	     unsigned long len __attribute__((__unused__)))
+handle_bytes(void *arg UNUSED,
+	     const char *buf UNUSED,
+	     unsigned long len UNUSED)
 {
 	saw_content = 1;
 }
 
 static PRBool
-decryption_allowed(SECAlgorithmID *algid __attribute__((__unused__)),
-		   PK11SymKey *key __attribute__((__unused__)))
+decryption_allowed(SECAlgorithmID *algid UNUSED,
+		   PK11SymKey *key UNUSED)
 {
 	return PR_TRUE;
 }
@@ -66,8 +55,8 @@ insert_signature(cms_context *cms, int signum)
 		sizeof (SECItem *) * (cms->num_signatures + 1));
 	if (!signatures) {
 err:
-		cms->log(cms, LOG_ERR, "insert signature: could not allocate "
-					"memory: %m");
+		cms->log(cms, LOG_ERR,
+			 "insert signature: could not allocate memory: %m");
 		exit(1);
 	}
 	cms->signatures = signatures;
@@ -78,6 +67,9 @@ err:
 	}
 
 	SECItem *newsig = malloc(sizeof (*newsig));
+	if (!newsig)
+		goto err;
+
 	memcpy(newsig, sig, sizeof (*newsig));
 	newsig->data = malloc(sig->len);
 	if (!newsig->data)
@@ -96,7 +88,6 @@ list_signatures(pesign_context *ctx)
 	cert_iter iter;
 
 	int rc = cert_iter_init(&iter, ctx->inpe);
-
 	if (rc < 0) {
 		printf("No certificate list found.\n");
 		return rc;
@@ -106,7 +97,6 @@ list_signatures(pesign_context *ctx)
 	ssize_t datalen;
 	int nsigs = 0;
 
-	rc = 0;
 	while (1) {
 		rc = next_cert(&iter, &data, &datalen);
 		if (rc <= 0)
@@ -290,13 +280,11 @@ parse_signature(pesign_context *ctx)
 {
 	int rc;
 	char *sig;
-	size_t siglen;
+	size_t siglen = 0;
 
 	rc = read_file(ctx->insigfd, &sig, &siglen);
-	if (rc < 0) {
-		fprintf(stderr, "pesign: could not read signature.\n");
-		exit(1);
-	}
+	if (rc < 0)
+		liberr(1, "pesign: could not read signature");
 
 	unsigned char *der;
 	unsigned int derlen;
@@ -306,10 +294,8 @@ parse_signature(pesign_context *ctx)
 	if (base64) {
 		base64 += strlen(sig_begin_marker);
 		char *end = strstr(base64, sig_end_marker);
-		if (!end) {
-			fprintf(stderr, "pesign: Invalid signature.\n");
-			exit(1);
-		}
+		if (!end)
+			liberr(1, "pesign: Invalid signature");
 
 		derlen = end - base64;
 		base64[derlen] = '\0';
@@ -317,11 +303,11 @@ parse_signature(pesign_context *ctx)
 		unsigned char *dertmp;
 		dertmp = ATOB_AsciiToData(base64, &derlen);
 
-		der = malloc(derlen);
+		der = xcalloc(1, derlen);
 		memmove(der, dertmp, derlen);
 		PORT_Free(dertmp);
 	} else {
-		der = malloc(siglen);
+		der = xcalloc(1, siglen);
 		memmove(der, sig, siglen);
 		derlen = siglen;
 	}
@@ -417,7 +403,7 @@ void
 check_signature_space(pesign_context *ctx)
 {
 	ssize_t available = available_cert_space(ctx->outpe);
-	ssize_t target = ctx->cms_ctx->newsig.len + sizeof (win_certificate);
+	ssize_t target = ctx->cms_ctx->newsig.len + sizeof (win_certificate_header_t);
 
 	target += ALIGNMENT_PADDING(target, 8);
 
@@ -446,11 +432,12 @@ remove_signature(pesign_context *p_ctx)
 	cms_context *ctx = p_ctx->cms_ctx;
 
 	free(ctx->signatures[p_ctx->signum]->data);
+	free(ctx->signatures[p_ctx->signum]);
 	if (p_ctx->signum != ctx->num_signatures - 1)
-		memmove(ctx->signatures[p_ctx->signum],
-			ctx->signatures[p_ctx->signum+1],
-			sizeof(SECItem) *
-				(ctx->num_signatures - 1));
+		memmove(&ctx->signatures[p_ctx->signum],
+			&ctx->signatures[p_ctx->signum+1],
+			sizeof(SECItem*) *
+				(ctx->num_signatures - p_ctx->signum - 1));
 
 	ctx->num_signatures--;
 }

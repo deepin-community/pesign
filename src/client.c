@@ -1,27 +1,19 @@
-/* Copyright 2011-2014 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+// SPDX-License-Identifier: GPLv2
+/*
+ * client.c - main entry for the pesign-client utility
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
+#include "fix_coverity.h"
 
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <popt.h>
 #include <pwd.h>
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -57,24 +49,24 @@ print_flag_name(FILE *f, int flag)
 }
 
 static int
-connect_to_server(void)
+connect_to_server_helper(const char * const sockpath)
 {
-	int rc = access(SOCKPATH, R_OK);
+	int rc = access(sockpath, R_OK);
 	if (rc != 0) {
-		fprintf(stderr, "pesign-client: could not connect to server: "
-			"%m\n");
-		exit(1);
+		warn("could not access socket \"%s\"", sockpath);
+		return rc;
 	}
 
 	struct sockaddr_un addr_un = {
 		.sun_family = AF_UNIX,
-		.sun_path = SOCKPATH,
 	};
+	strncpy(addr_un.sun_path, sockpath, sizeof(addr_un.sun_path));
+	addr_un.sun_path[sizeof(addr_un.sun_path)-1] = '\0';
 
 	int sd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sd < 0) {
-		fprintf(stderr, "pesign-client: could not open socket: %m\n");
-		exit(1);
+		warn("could not open socket \"%s\"", sockpath);
+		return sd;
 	}
 
 	socklen_t len = strlen(addr_un.sun_path) +
@@ -82,19 +74,38 @@ connect_to_server(void)
 
 	rc = connect(sd, (struct sockaddr *)&addr_un, len);
 	if (rc < 0) {
-		fprintf(stderr, "pesign-client: could not connect to daemon: "
-			"%m\n");
-		exit(1);
+		warn("could not connect to daemon");
+		return sd;
 	}
 
 	return sd;
 }
 
+static int
+connect_to_server(void)
+{
+	int rc, i;
+	const char * const sockets[] = {
+		RUNDIR "/pesign/socket",
+		"/run/pesign/socket",
+		"/var/run/pesign/socket",
+		NULL
+	};
+
+	for (i = 0; sockets[i] != NULL; i++) {
+		rc = connect_to_server_helper(sockets[i]);
+		if (rc >= 0)
+			return rc;
+	}
+
+	exit(1);
+}
+
 static int32_t
 check_response(int sd, char **srvmsg);
 
-static void
-check_cmd_version(int sd, uint32_t command, char *name, int32_t version)
+static int
+check_cmd_version(int sd, uint32_t command, char *name, int32_t version, bool do_exit)
 {
 	struct msghdr msg;
 	struct iovec iov[1];
@@ -113,7 +124,7 @@ check_cmd_version(int sd, uint32_t command, char *name, int32_t version)
 	ssize_t n;
 	n = sendmsg(sd, &msg, 0);
 	if (n < 0) {
-		fprintf(stderr, "check-cmd-version: kill daemon failed: %m\n");
+		fprintf(stderr, "check-cmd-version: sendmsg failed: %m\n");
 		exit(1);
 	}
 
@@ -129,11 +140,19 @@ check_cmd_version(int sd, uint32_t command, char *name, int32_t version)
 
 	char *srvmsg = NULL;
 	int32_t rc = check_response(sd, &srvmsg);
-	if (rc < 0)
+
+	if (srvmsg)
+		free(srvmsg);
+
+	if (do_exit && rc < 0)
 		errx(1, "command \"%s\" not known by server", name);
-	if (rc != version)
-		errx(1, "command \"%s\": client version %d, server version %d",
+	if (do_exit && rc != version)
+		errx(1, "command \"%s\": client version %#x, server version %#x",
 			name, version, rc);
+
+	if (rc < 0)
+		return rc;
+	return rc == version;
 }
 
 static void
@@ -143,7 +162,7 @@ send_kill_daemon(int sd)
 	struct iovec iov;
 	pesignd_msghdr pm;
 
-	check_cmd_version(sd, CMD_KILL_DAEMON, "kill-daemon", 0);
+	check_cmd_version(sd, CMD_KILL_DAEMON, "kill-daemon", 0, true);
 
 	pm.version = PESIGND_VERSION;
 	pm.command = CMD_KILL_DAEMON;
@@ -196,8 +215,8 @@ check_response(int sd, char **srvmsg)
 	pm = (pesignd_msghdr *)buffer;
 
 	if (pm->version != PESIGND_VERSION) {
-		fprintf(stderr, "pesign-client: got version %d, "
-			"expected version %d\n", pm->version, PESIGND_VERSION);
+		fprintf(stderr, "pesign-client: got version %#x, "
+			"expected version %#x\n", pm->version, PESIGND_VERSION);
 		exit(1);
 	}
 
@@ -285,7 +304,7 @@ unlock_token(int sd, char *tokenname, char *pin)
 
 	uint32_t size1 = pesignd_string_size(pin);
 
-	check_cmd_version(sd, CMD_UNLOCK_TOKEN, "unlock-token", 0);
+	check_cmd_version(sd, CMD_UNLOCK_TOKEN, "unlock-token", 0, true);
 
 	pm.version = PESIGND_VERSION;
 	pm.command = CMD_UNLOCK_TOKEN;
@@ -343,6 +362,14 @@ unlock_token(int sd, char *tokenname, char *pin)
 	}
 
 	free(buffer);
+
+	/*
+	 * This can't happen, because srvmsg is only allocated if
+	 * check_response() would return an error, but scan-build gets
+	 * confused and I'm tired of trying to convince it. --pj
+	 */
+	if (srvmsg)
+		free(srvmsg);
 }
 
 static void
@@ -354,7 +381,7 @@ is_token_unlocked(int sd, char *tokenname)
 
 	uint32_t size0 = pesignd_string_size(tokenname);
 
-	check_cmd_version(sd, CMD_IS_TOKEN_UNLOCKED, "is-token-unlocked", 0);
+	check_cmd_version(sd, CMD_IS_TOKEN_UNLOCKED, "is-token-unlocked", 0, true);
 
 	pm.version = PESIGND_VERSION;
 	pm.command = CMD_IS_TOKEN_UNLOCKED;
@@ -395,6 +422,15 @@ is_token_unlocked(int sd, char *tokenname)
 	printf("token \"%s\" is %slocked\n", tokenname, rc == 1 ? "" : "un");
 
 	free(buffer);
+
+	/*
+	 * This can't happen, because srvmsg is only allocated if
+	 * check_response() would return an error, but scan-build gets
+	 * confused and I'm tired of trying to convince it. --pj
+	 */
+	if (srvmsg)
+		free(srvmsg);
+
 }
 
 static void
@@ -442,8 +478,11 @@ send_fd(int sd, int fd)
 
 static void
 sign(int sd, char *infile, char *outfile, char *tokenname, char *certname,
-	int attached)
+	int attached, uint32_t format)
 {
+	int rc;
+	bool add_file_type;
+
 	int infd = open(infile, O_RDONLY);
 	if (infd < 0) {
 		fprintf(stderr, "pesign-client: could not open input file "
@@ -459,7 +498,7 @@ sign(int sd, char *infile, char *outfile, char *tokenname, char *certname,
 	}
 
 	struct msghdr msg;
-	struct iovec iov[2];
+	struct iovec iov[3];
 
 	uint32_t size0 = pesignd_string_size(tokenname);
 	uint32_t size1 = pesignd_string_size(certname);
@@ -473,12 +512,27 @@ oom:
 		exit(1);
 	}
 
-	check_cmd_version(sd, attached ? CMD_SIGN_ATTACHED : CMD_SIGN_DETACHED,
-			attached ? "sign-attached" : "sign-detached", 0);
+	rc = check_cmd_version(sd,
+			       attached ? CMD_SIGN_ATTACHED_WITH_FILE_TYPE
+					: CMD_SIGN_DETACHED_WITH_FILE_TYPE,
+			       attached ? "sign-attached" : "sign-detached",
+			       0, format == FORMAT_KERNEL_MODULE);
+	if (rc >= 0) {
+		add_file_type = true;
+	} else {
+		add_file_type = false;
+		check_cmd_version(sd, attached ? CMD_SIGN_ATTACHED
+					       : CMD_SIGN_DETACHED,
+				  attached ? "sign-attached" : "sign-detached",
+				  0, true);
+	}
 
 	pm->version = PESIGND_VERSION;
-	pm->command = attached ? CMD_SIGN_ATTACHED : CMD_SIGN_DETACHED;
-	pm->size = size0 + size1;
+	pm->command = attached ? (add_file_type ? CMD_SIGN_ATTACHED_WITH_FILE_TYPE
+						: CMD_SIGN_ATTACHED)
+			       : (add_file_type ? CMD_SIGN_DETACHED_WITH_FILE_TYPE
+						: CMD_SIGN_DETACHED);
+	pm->size = size0 + size1 + (add_file_type ? sizeof(format) : 0);
 	iov[0].iov_base = pm;
 	iov[0].iov_len = sizeof (*pm);
 
@@ -495,22 +549,31 @@ oom:
 	}
 
 	char *buffer;
-	buffer = malloc(size0 + size1);
+	buffer = malloc(pm->size);
 	if (!buffer)
 		goto oom;
 
+	int pos = 0;
+
+	if (add_file_type) {
+		iov[pos].iov_base = &format;
+		iov[pos].iov_len = sizeof(format);
+		pos++;
+	}
+
 	pesignd_string *tn = (pesignd_string *)buffer;
 	pesignd_string_set(tn, tokenname);
-	iov[0].iov_base = tn;
-	iov[0].iov_len = size0;
+	iov[pos].iov_base = tn;
+	iov[pos].iov_len = size0;
+	pos++;
 
 	pesignd_string *cn = pesignd_string_next(tn);
 	pesignd_string_set(cn, certname);
-	iov[1].iov_base = cn;
-	iov[1].iov_len = size1;
+	iov[pos].iov_base = cn;
+	iov[pos].iov_len = size1;
 
 	msg.msg_iov = iov;
-	msg.msg_iovlen = 2;
+	msg.msg_iovlen = add_file_type ? 3 : 2;
 
 	n = sendmsg(sd, &msg, 0);
 	if (n < 0) {
@@ -524,17 +587,31 @@ oom:
 	send_fd(sd, outfd);
 
 	char *srvmsg = NULL;
-	int rc = check_response(sd, &srvmsg);
+	rc = check_response(sd, &srvmsg);
 	if (rc < 0) {
 		fprintf(stderr, "pesign-client: signing failed: \"%s\"\n",
 			srvmsg);
 		exit(1);
 	}
 
+	/*
+	 * This can't happen, because srvmsg is only allocated if
+	 * check_response() would return an error, but scan-build gets
+	 * confused and I'm tired of trying to convince it. --pj
+	 */
+	if (srvmsg)
+		free(srvmsg);
+
 	close(infd);
 	close(outfd);
 
 	return;
+}
+
+static long verbose;
+long verbosity(void)
+{
+        return verbose;
 }
 
 int
@@ -552,10 +629,11 @@ main(int argc, char *argv[])
 	int pinfd = -1;
 	char *pinfile = NULL;
 	char *tokenpin = NULL;
+	file_format file_format = FORMAT_PE_BINARY;
 
 	struct poptOption options[] = {
 		{.argInfo = POPT_ARG_INTL_DOMAIN,
-		 .descrip = "pesign" },
+		 .arg = "pesign" },
 		{.longName = "token",
 		 .shortName = 't',
 		 .argInfo = POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT,
@@ -623,10 +701,24 @@ main(int argc, char *argv[])
 		 .arg = &pinfile,
 		 .descrip = "read named file for pin information",
 		 .argDescrip = "<pin file name>" },
+		{.longName = "verbose",
+		 .shortName = 'v',
+		 .argInfo = POPT_ARG_VAL,
+		 .arg = &verbose,
+		 .val = 1,
+		 .descrip = "be more verbose" },
+		{.longName = "debug",
+		 .shortName = '\0',
+		 .argInfo = POPT_ARG_VAL|POPT_ARG_LONG|POPT_ARGFLAG_OPTIONAL,
+		 .arg = &verbose,
+		 .val = 2,
+		 .descrip = "be very verbose" },
 		POPT_AUTOALIAS
 		POPT_AUTOHELP
 		POPT_TABLEEND
 	};
+
+	setenv("NSS_DEFAULT_DB_TYPE", "sql", 0);
 
 	optCon = poptGetContext("pesign", argc, (const char **)argv, options,0);
 
@@ -679,6 +771,12 @@ main(int argc, char *argv[])
 
 	int sd = -1;
 
+	if (infile) {
+		char *ext = strrchr(infile, '.');
+		if (ext && strcmp(ext, ".ko") == 0)
+			file_format = FORMAT_KERNEL_MODULE;
+	}
+
 	switch (action) {
 	case UNLOCK_TOKEN:
 		tokenpin = get_token_pin(pinfd, pinfile, "PESIGN_TOKEN_PIN");
@@ -716,11 +814,11 @@ main(int argc, char *argv[])
 		}
 		if (!certname) {
 			fprintf(stderr, "pesign-client: no certificate name "
-				"spefified\n");
+				"specified\n");
 			exit(1);
 		}
 		sd = connect_to_server();
-		sign(sd, infile, outfile, tokenname, certname, attached);
+		sign(sd, infile, outfile, tokenname, certname, attached, file_format);
 		break;
 	default:
 		fprintf(stderr, "Incompatible flags (0x%08x): ", action);

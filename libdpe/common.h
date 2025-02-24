@@ -1,23 +1,13 @@
+// SPDX-License-Identifier: GPLv2
 /*
- * Copyright 2011 Red Hat, Inc.
- * All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- * Author(s): Peter Jones <pjones@redhat.com>
+ * common.h - common types and helpers
+ * Copyright Peter Jones <pjones@redhat.com>
+ * Copyright Red Hat, Inc.
  */
 #ifndef LIBDPE_COMMON_H
 #define LIBDPE_COMMON_H 1
+
+#include "fix_coverity.h"
 
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -31,36 +21,34 @@
 
 #define is_64_bit(pe) ((pe)->flags & IMAGE_FILE_32BIT_MACHINE)
 
-#define ALIGNMENT_PADDING(address, align) ((align - (address % align)) % align)
-
 #define xfree(x) ({if (x) { free(x); x = NULL; }})
 #define xmunmap(addr, size) ({if (addr) { munmap(addr,size); addr = NULL; }})
 
 #include <stdio.h>
 
-static inline void *
-__attribute__ ((unused))
+static inline void * UNUSED
 compute_mem_addr(Pe *pe, off_t offset)
 {
 	/* XXX this might not work when we're not mmapped */
 	return (char *)pe->map_address + le32_to_cpu(offset);
 }
 
-static inline uint32_t
-__attribute__ ((unused))
+static inline uint32_t UNUSED
 compute_file_addr(Pe *pe, void *addr)
 {
 	/* XXX this might not work when we're not mmapped */
 	return cpu_to_le32((char *)addr - ((char *)pe->map_address));
 }
 
-static inline size_t
-__attribute__ ((unused))
-get_shnum(void *map_address, size_t maxsize __attribute__((__unused__)))
+static inline size_t UNUSED
+get_shnum(void *map_address, size_t maxsize UNUSED)
 {
 	size_t result = 0;
 	void *buf = (void *)map_address;
 	struct mz_hdr *mz = (struct mz_hdr *)buf;
+
+	if (mz == NULL)
+		return (size_t)-1l;
 
 	off_t hdr = (off_t)le32_to_cpu(mz->peaddr);
 	struct pe_hdr *pe = (struct pe_hdr *)(buf + hdr);
@@ -72,9 +60,8 @@ get_shnum(void *map_address, size_t maxsize __attribute__((__unused__)))
 	return result;
 }
 
-static inline Pe_Kind
-__attribute__ ((unused))
-determine_kind(void *buf, size_t len __attribute__((__unused__)))
+static inline Pe_Kind UNUSED
+determine_kind(void *buf, size_t len UNUSED)
 {
 	Pe_Kind retval = PE_K_NONE;
 	uint16_t mz_magic = MZ_MAGIC;
@@ -82,7 +69,7 @@ determine_kind(void *buf, size_t len __attribute__((__unused__)))
 
 	if (cmp_le16(&mz->magic, &mz_magic))
 		return retval;
-		
+
 	retval = PE_K_MZ;
 
 	off_t hdr = (off_t)le32_to_cpu(mz->peaddr);
@@ -131,8 +118,7 @@ determine_kind(void *buf, size_t len __attribute__((__unused__)))
 #undef choose_kind
 #undef is_64_bit
 
-static inline Pe *
-__attribute__ ((unused))
+static inline Pe * UNUSED
 allocate_pe(int fildes, void *map_address, size_t maxsize,
 	Pe_Cmd cmd, Pe *parent, Pe_Kind kind, size_t extra)
 {
